@@ -104,9 +104,18 @@ test('gmtNow returns an RFC 1123 / GMT formatted date string', () => {
   assert.match(internals.gmtNow(), /^[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT$/)
 })
 
-test('apply registers a single read-only tool and a system prompt section', () => {
+test('apply registers all read-only tools and a system prompt section', () => {
   const { sections, tools } = createContext()
-  assert.deepEqual(tools.map((tool) => tool.name), ['jumpserver_list_assets'])
+  assert.deepEqual(tools.map((tool) => tool.name), [
+    'jumpserver_list_assets',
+    'jumpserver_get_asset',
+    'jumpserver_list_users',
+    'jumpserver_get_user',
+    'jumpserver_list_accounts',
+    'jumpserver_get_account',
+    'jumpserver_list_permissions',
+    'jumpserver_list_sessions',
+  ])
   assert.equal(sections.length, 1)
   assert.equal(sections[0].name, 'tool:jumpserver')
 })
@@ -159,7 +168,7 @@ test('jumpserver_list_assets clamps limit/offset and omits empty search', async 
     const { tools } = createContext()
     const list = toolByName(tools, 'jumpserver_list_assets')
     const output = await list.execute({ limit: 1000, offset: -5 }, execution())
-    assert.equal(output, '(no assets found)')
+    assert.equal(output, '(no results found)')
     const requestUrl = new URL(calls[0])
     assert.equal(requestUrl.searchParams.get('limit'), '100')
     assert.equal(requestUrl.searchParams.get('offset'), '0')
@@ -185,6 +194,173 @@ test('jumpserver_list_assets fails clearly when AccessKey credentials are missin
   const { tools } = createContext({ ak: '', sk: '' })
   const list = toolByName(tools, 'jumpserver_list_assets')
   await assert.rejects(list.execute({}, execution()), /JUMPSERVER_ACCESS_KEY_ID.*not configured/)
+})
+
+test('requireId accepts JumpServer UUIDs and rejects anything else (path injection guard)', () => {
+  assert.equal(internals.requireId('123e4567-e89b-12d3-a456-426614174000', 'id'), '123e4567-e89b-12d3-a456-426614174000')
+  assert.throws(() => internals.requireId('../assets/other-id', 'id'), /must be a valid JumpServer UUID/)
+  assert.throws(() => internals.requireId('not-a-uuid', 'id'), /must be a valid JumpServer UUID/)
+  assert.throws(() => internals.requireId('', 'id'), /must be a valid JumpServer UUID/)
+})
+
+test('jumpserver_get_asset fetches a single asset by id and rejects malformed ids', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    return jsonResponse({
+      id: '123e4567-e89b-12d3-a456-426614174000',
+      name: 'web-01',
+      address: '10.0.0.1',
+      platform: 'Linux',
+      category: { label: '主机' },
+      type: { label: 'Linux' },
+      domain: null,
+      protocols: [{ name: 'ssh', port: 22 }],
+      is_active: true,
+      comment: '',
+    })
+  }
+  try {
+    const { tools } = createContext()
+    const get = toolByName(tools, 'jumpserver_get_asset')
+    const output = await get.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(output, /name="web-01"/)
+    assert.match(output, /protocols="ssh:22"/)
+    const requestUrl = new URL(calls[0])
+    assert.equal(requestUrl.pathname, '/api/v1/assets/assets/123e4567-e89b-12d3-a456-426614174000/')
+    await assert.rejects(get.execute({ id: '../etc/passwd' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_list_users never surfaces password, public_key, or MFA secret fields', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => jsonResponse({
+    count: 1,
+    results: [{
+      id: 'u1', username: 'alice', name: 'Alice', email: 'alice@example.com',
+      is_active: true, is_superuser: false, source: 'local',
+      password: 'must-not-leak', public_key: 'ssh-rsa MUST-NOT-LEAK',
+    }],
+  })
+  try {
+    const { tools } = createContext()
+    const output = await toolByName(tools, 'jumpserver_list_users').execute({}, execution())
+    assert.match(output, /username="alice"/)
+    assert.doesNotMatch(output, /must-not-leak/)
+    assert.doesNotMatch(output, /password/)
+    assert.doesNotMatch(output, /public_key/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_get_user never surfaces password, public_key, or MFA secret fields', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => jsonResponse({
+    id: 'u1', username: 'alice', name: 'Alice', email: 'alice@example.com',
+    phone: '', source: 'local', is_active: true, is_superuser: false, is_org_admin: false,
+    mfa_enabled: false, is_valid: true, is_expired: false, last_login: null, comment: '',
+    password: 'must-not-leak', public_key: 'ssh-rsa MUST-NOT-LEAK',
+  })
+  try {
+    const { tools } = createContext()
+    const output = await toolByName(tools, 'jumpserver_get_user').execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(output, /username="alice"/)
+    assert.doesNotMatch(output, /must-not-leak/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_list_accounts never surfaces secret or passphrase fields, and validates asset filter', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    return jsonResponse({
+      count: 1,
+      results: [{
+        id: 'a1', name: 'root account', username: 'root', asset: 'asset-1',
+        secret_type: 'password', privileged: true, is_active: true, source: 'local',
+        secret: 'must-not-leak', passphrase: 'must-not-leak-either',
+      }],
+    })
+  }
+  try {
+    const { tools } = createContext()
+    const list = toolByName(tools, 'jumpserver_list_accounts')
+    const output = await list.execute({ asset: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(output, /username="root"/)
+    assert.doesNotMatch(output, /must-not-leak/)
+    assert.doesNotMatch(output, /secret=/)
+    assert.doesNotMatch(output, /passphrase/)
+    const requestUrl = new URL(calls[0])
+    assert.equal(requestUrl.searchParams.get('asset'), '123e4567-e89b-12d3-a456-426614174000')
+    await assert.rejects(list.execute({ asset: 'not-a-uuid' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_get_account never surfaces the secret or passphrase field', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => jsonResponse({
+    id: 'a1', name: 'root account', username: 'root', asset: 'asset-1',
+    secret_type: 'password', privileged: true, is_active: true, source: 'local',
+    connectivity: 'ok', comment: '',
+    secret: 'must-not-leak', passphrase: 'must-not-leak-either',
+  })
+  try {
+    const { tools } = createContext()
+    const output = await toolByName(tools, 'jumpserver_get_account').execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(output, /username="root"/)
+    assert.doesNotMatch(output, /must-not-leak/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_list_permissions validates userId/assetId filters and formats rows', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    return jsonResponse({ count: 1, results: [{ id: 'p1', name: 'dev-access', is_active: true, is_valid: true, is_expired: false }] })
+  }
+  try {
+    const { tools } = createContext()
+    const list = toolByName(tools, 'jumpserver_list_permissions')
+    const output = await list.execute({ userId: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(output, /name="dev-access"/)
+    const requestUrl = new URL(calls[0])
+    assert.equal(requestUrl.searchParams.get('user_id'), '123e4567-e89b-12d3-a456-426614174000')
+    await assert.rejects(list.execute({ assetId: 'bad' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_list_sessions filters by user/asset/isFinished and formats rows', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    return jsonResponse({ count: 1, results: [{ id: 's1', user: 'alice', asset: 'web-01', account: 'root', protocol: 'ssh', is_success: true, is_finished: true }] })
+  }
+  try {
+    const { tools } = createContext()
+    const list = toolByName(tools, 'jumpserver_list_sessions')
+    const output = await list.execute({ user: 'alice', isFinished: true }, execution())
+    assert.match(output, /user="alice"/)
+    const requestUrl = new URL(calls[0])
+    assert.equal(requestUrl.searchParams.get('user'), 'alice')
+    assert.equal(requestUrl.searchParams.get('is_finished'), 'true')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 })
 
 function createSettingsContext(userSection = {}) {

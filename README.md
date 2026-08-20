@@ -50,12 +50,11 @@ In DSH Web, open **Settings → Plugins → JumpServer asset lookup**.
 
 Configure:
 
-- **AccessKeyID**: create one from the JumpServer web console under your personal API Key list.
-- **AccessKeySecret**: paired with the AccessKeyID above.
 - **JumpServer URL**: the absolute base URL, for example `https://jumpserver.example.com`.
-- **Organization ID** (optional): sent as the `X-JMS-ORG` header for multi-organization deployments.
+- **Access Key**: create one from the JumpServer web console under your personal API Key list.
+- **Secret Key**: paired with the Access Key above.
 
-The AccessKeyID/AccessKeySecret use DSH's privileged loopback credential RPC — write-only, the stored values are never read back or displayed. The URL and organization ID are stored in the `jumpserver` settings namespace as non-secret fields, so they are read back in plaintext and shown in the card for verification.
+The Access Key/Secret Key use DSH's privileged loopback credential RPC — write-only, the stored values are never read back or displayed. The URL is stored in the `jumpserver` settings namespace as a non-secret field, so it is read back in plaintext and shown in the card for verification.
 
 HTTP and HTTPS both work out of the box — internal deployments without TLS certificates can use an `http://` URL with no extra setup. Note that plain HTTP sends the signed request (though not the secret itself) over an unencrypted channel; prefer HTTPS over untrusted networks. To enforce HTTPS only, disable it in plugin configuration:
 

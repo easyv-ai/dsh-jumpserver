@@ -50,12 +50,11 @@ dsh plugin --profile add github:easyv-ai/dsh-jumpserver
 
 需要配置：
 
-- **AccessKeyID**：在 JumpServer 网页控制台的个人 API Key 列表中创建。
-- **AccessKeySecret**：与上面的 AccessKeyID 配对。
 - **JumpServer URL**：绝对地址，例如 `https://jumpserver.example.com`。
-- **组织 ID**（可选）：多组织部署时，作为 `X-JMS-ORG` 请求头发送。
+- **Access Key**：在 JumpServer 网页控制台的个人 API Key 列表中创建。
+- **Secret Key**：与上面的 Access Key 配对。
 
-AccessKeyID/AccessKeySecret 使用 DSH 特权的本地回环凭证 RPC——只写不读，存储的值永远不会被读回或显示。URL 和组织 ID 存储在 `jumpserver` 设置命名空间中，属于非敏感字段，保存后会以明文形式回显在卡片中以便核对。
+Access Key/Secret Key 使用 DSH 特权的本地回环凭证 RPC——只写不读，存储的值永远不会被读回或显示。URL 存储在 `jumpserver` 设置命名空间中，属于非敏感字段，保存后会以明文形式回显在卡片中以便核对。
 
 HTTP 和 HTTPS 均可直接使用——没有 TLS 证书的内部部署可以直接用 `http://` 地址，无需额外配置。请注意，纯 HTTP 会以明文方式传输签名后的请求（虽然密钥本身不会被传输），在不受信任的网络中建议优先使用 HTTPS。如需强制只使用 HTTPS，可在插件配置中关闭：
 

@@ -35,7 +35,6 @@ export const Config = Schema.object({
   baseUrl: Schema.string().default('').description('JumpServer base URL, e.g. https://jumpserver.example.com. When empty, resolve from settings.'),
   akRef: Schema.string().default(AK_REF).description('Credential reference containing the JumpServer AccessKeyID.'),
   skRef: Schema.string().default(SK_REF).description('Credential reference containing the JumpServer AccessKeySecret.'),
-  orgId: Schema.string().default('').description('Optional JumpServer organization ID sent as the X-JMS-ORG header.'),
   allowInsecureHttp: Schema.boolean().default(true).description('Allow plain HTTP for non-loopback JumpServer hosts. Enabled by default so internal HTTP deployments work out of the box; set to false to enforce HTTPS only.'),
 })
 
@@ -158,7 +157,6 @@ export function apply(ctx, config = {}) {
     baseUrl: '',
     akRef: AK_REF,
     skRef: SK_REF,
-    orgId: '',
     allowInsecureHttp: true,
     ...config,
   }
@@ -199,7 +197,6 @@ export function apply(ctx, config = {}) {
 
   async function api(path, { method = 'GET', parentSignal } = {}) {
     const baseUrl = await resolveBaseUrl()
-    const { orgId } = activeConfig()
     const { keyId, secret } = await resolveAuth()
     const attempts = method === 'GET' ? 2 : 1
 
@@ -213,7 +210,6 @@ export function apply(ctx, config = {}) {
         Date: date,
         Authorization: authorization,
       }
-      if (orgId) headers['X-JMS-ORG'] = orgId
 
       let response
       try {

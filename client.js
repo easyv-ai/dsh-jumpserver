@@ -1,7 +1,7 @@
 // dsh-jumpserver 浏览器设置卡片。
 // AccessKeyID / AccessKeySecret 走 DSH 凭证库的 loopback same-origin RPC：仅写不读，
 // describe 只返回 configured 布尔，客户端永远不会读回明文，故以星号占位。
-// baseUrl / orgId 不是敏感信息，存 settings namespace（jumpserver）：settings.describe 对
+// baseUrl 不是敏感信息，存 settings namespace（jumpserver）：settings.describe 对
 // 非 secret 字段返回明文 value，因此保存后可直接回显核对。
 window.__ModuleLoader__.load({
   id: "dsh-jumpserver",
@@ -23,57 +23,51 @@ window.__ModuleLoader__.load({
       zh: {
         title: "JumpServer 资产查询",
         desc: "通过对话查询 JumpServer 资产。AccessKey 仅保存在本地，永远不会被显示。",
-        akLabel: "AccessKeyID",
-        skLabel: "AccessKeySecret",
+        akLabel: "Access Key",
+        skLabel: "Secret Key",
         configured: "已配置",
         notConfigured: "未配置",
-        akPlaceholder: "留空则保留当前值；输入新 AccessKeyID 以替换",
-        skPlaceholder: "留空则保留当前值；输入新 AccessKeySecret 以替换",
+        akPlaceholder: "留空则保留当前值；输入新 Access Key 以替换",
+        skPlaceholder: "留空则保留当前值；输入新 Secret Key 以替换",
         hintConfigured: "已配置。星号只是占位符，并非存储的值。",
         hintEmpty: "存储在本地 DSH 凭证库中，凭证值永远不会被读回。",
-        removeAk: "移除 AccessKeyID",
-        removeSk: "移除 AccessKeySecret",
+        removeAk: "移除 Access Key",
+        removeSk: "移除 Secret Key",
         urlPlaceholderConfigured: "输入新 URL 以替换",
         urlPlaceholderEmpty: "https://jumpserver.example.com",
         urlHint: "支持 HTTP 与 HTTPS。URL 保存在设置中，保存后会在此显示以便核对。",
         removeUrl: "移除 URL",
-        orgLabel: "组织 ID（可选）",
-        orgPlaceholder: "留空则不发送 X-JMS-ORG",
-        orgHint: "对应 JumpServer 的组织 ID，多组织部署时可填写。",
         saving: "保存中…",
         save: "保存",
         saved: "已保存。新会话将使用更新后的配置。",
         invalidUrl: "JumpServer URL 必须是不含凭证、查询参数或片段的绝对 HTTP(S) 地址。",
-        confirmRemoveAk: "确定要移除已存储的 AccessKeyID 吗？",
-        confirmRemoveSk: "确定要移除已存储的 AccessKeySecret 吗？",
+        confirmRemoveAk: "确定要移除已存储的 Access Key 吗？",
+        confirmRemoveSk: "确定要移除已存储的 Secret Key 吗？",
         confirmRemoveUrl: "确定要移除已存储的 JumpServer URL 吗？"
       },
       en: {
         title: "JumpServer asset lookup",
         desc: "Query JumpServer assets through conversation. The AccessKey is stored locally and never displayed.",
-        akLabel: "AccessKeyID",
-        skLabel: "AccessKeySecret",
+        akLabel: "Access Key",
+        skLabel: "Secret Key",
         configured: "Configured",
         notConfigured: "Not configured",
-        akPlaceholder: "Leave blank to keep the current value; enter a new AccessKeyID to replace it",
-        skPlaceholder: "Leave blank to keep the current value; enter a new AccessKeySecret to replace it",
+        akPlaceholder: "Leave blank to keep the current value; enter a new Access Key to replace it",
+        skPlaceholder: "Leave blank to keep the current value; enter a new Secret Key to replace it",
         hintConfigured: "Configured. The stars are a placeholder, not the stored value.",
         hintEmpty: "Stored in the local DSH credential store; the value is never read back.",
-        removeAk: "Remove AccessKeyID",
-        removeSk: "Remove AccessKeySecret",
+        removeAk: "Remove Access Key",
+        removeSk: "Remove Secret Key",
         urlPlaceholderConfigured: "Enter a new URL to replace it",
         urlPlaceholderEmpty: "https://jumpserver.example.com",
         urlHint: "HTTP and HTTPS are both supported. The URL is stored in settings and shown here after saving.",
         removeUrl: "Remove URL",
-        orgLabel: "Organization ID (optional)",
-        orgPlaceholder: "Leave blank to omit X-JMS-ORG",
-        orgHint: "JumpServer organization ID, useful for multi-org deployments.",
         saving: "Saving…",
         save: "Save",
         saved: "Saved. New conversations will use the updated configuration.",
         invalidUrl: "JumpServer URL must be an absolute HTTP(S) URL without credentials, query, or fragment.",
-        confirmRemoveAk: "Remove the stored AccessKeyID?",
-        confirmRemoveSk: "Remove the stored AccessKeySecret?",
+        confirmRemoveAk: "Remove the stored Access Key?",
+        confirmRemoveSk: "Remove the stored Secret Key?",
         confirmRemoveUrl: "Remove the stored JumpServer URL?"
       }
     };
@@ -117,7 +111,6 @@ window.__ModuleLoader__.load({
       const [akDraft, setAkDraft] = react.useState("");
       const [skDraft, setSkDraft] = react.useState("");
       const [baseDraft, setBaseDraft] = react.useState("");
-      const [orgDraft, setOrgDraft] = react.useState("");
       const [saving, setSaving] = react.useState(false);
       const [saved, setSaved] = react.useState(false);
       const [error, setError] = react.useState("");
@@ -137,9 +130,8 @@ window.__ModuleLoader__.load({
         face.describe().then((r) => {
           if (!alive) return;
           setStatus({ loaded: true, ak: r.akConfigured, sk: r.skConfigured, base: r.baseConfigured });
-          // URL/orgId 存 settings namespace（非 secret），describe 直接返回明文，可靠回显。
+          // URL 存 settings namespace（非 secret），describe 直接返回明文，可靠回显。
           if (r.baseUrl) setBaseDraft(r.baseUrl);
-          if (r.orgId) setOrgDraft(r.orgId);
         }).catch(() => {});
         return () => { alive = false; };
       }, [face]);
@@ -161,7 +153,6 @@ window.__ModuleLoader__.load({
           const ak = akDraft.trim();
           const sk = skDraft.trim();
           const b = baseDraft.trim();
-          const org = orgDraft.trim();
           if (ak !== "") await face.setAk(ak);
           if (sk !== "") await face.setSk(sk);
           if (b !== "") {
@@ -171,7 +162,6 @@ window.__ModuleLoader__.load({
             }
             await face.setBaseUrl(b);
           }
-          await face.setOrgId(org);
           const r = await face.describe();
           setStatus({ loaded: true, ak: r.akConfigured, sk: r.skConfigured, base: r.baseConfigured });
           setAkDraft("");
@@ -179,7 +169,6 @@ window.__ModuleLoader__.load({
           setAkFocus(false);
           setSkFocus(false);
           setBaseDraft(b !== "" ? b : (r.baseConfigured ? r.baseUrl : ""));
-          setOrgDraft(r.orgId || "");
           setSaved(true);
         } catch (e) {
           setError(String(e?.message ?? e));
@@ -225,6 +214,17 @@ window.__ModuleLoader__.load({
         open ? (0, react_jsx_runtime.jsxs)("div", { style: S.body, children: [
           (0, react_jsx_runtime.jsxs)("div", { style: S.row, children: [
             (0, react_jsx_runtime.jsxs)("div", { style: S.head, children: [
+              (0, react_jsx_runtime.jsx)("label", { style: S.label, children: "JumpServer URL" }),
+              status.loaded ? (0, react_jsx_runtime.jsx)("span", { style: { ...S.badge, ...(status.base ? S.badgeOk : {}) }, children: status.base ? T.configured : T.notConfigured }) : null
+            ] }),
+            (0, react_jsx_runtime.jsxs)("div", { style: S.inputRow, children: [
+              (0, react_jsx_runtime.jsx)("input", { type: "url", style: S.input, placeholder: status.base ? T.urlPlaceholderConfigured : T.urlPlaceholderEmpty, value: baseDraft, onChange: (e) => setBaseDraft(e.target.value) }),
+              status.base ? (0, react_jsx_runtime.jsx)("button", { style: S.button, disabled: saving, onClick: () => onClear("base"), children: T.removeUrl }) : null
+            ] }),
+            (0, react_jsx_runtime.jsx)("p", { style: S.hint, children: T.urlHint })
+          ] }),
+          (0, react_jsx_runtime.jsxs)("div", { style: S.row, children: [
+            (0, react_jsx_runtime.jsxs)("div", { style: S.head, children: [
               (0, react_jsx_runtime.jsx)("label", { style: S.label, children: T.akLabel }),
               status.loaded ? (0, react_jsx_runtime.jsx)("span", { style: { ...S.badge, ...(status.ak ? S.badgeOk : {}) }, children: status.ak ? T.configured : T.notConfigured }) : null
             ] }),
@@ -253,26 +253,6 @@ window.__ModuleLoader__.load({
             ] }),
             (0, react_jsx_runtime.jsx)("p", { style: S.hint, children: status.sk ? T.hintConfigured : T.hintEmpty })
           ] }),
-          (0, react_jsx_runtime.jsxs)("div", { style: S.row, children: [
-            (0, react_jsx_runtime.jsxs)("div", { style: S.head, children: [
-              (0, react_jsx_runtime.jsx)("label", { style: S.label, children: "JumpServer URL" }),
-              status.loaded ? (0, react_jsx_runtime.jsx)("span", { style: { ...S.badge, ...(status.base ? S.badgeOk : {}) }, children: status.base ? T.configured : T.notConfigured }) : null
-            ] }),
-            (0, react_jsx_runtime.jsxs)("div", { style: S.inputRow, children: [
-              (0, react_jsx_runtime.jsx)("input", { type: "url", style: S.input, placeholder: status.base ? T.urlPlaceholderConfigured : T.urlPlaceholderEmpty, value: baseDraft, onChange: (e) => setBaseDraft(e.target.value) }),
-              status.base ? (0, react_jsx_runtime.jsx)("button", { style: S.button, disabled: saving, onClick: () => onClear("base"), children: T.removeUrl }) : null
-            ] }),
-            (0, react_jsx_runtime.jsx)("p", { style: S.hint, children: T.urlHint })
-          ] }),
-          (0, react_jsx_runtime.jsxs)("div", { style: S.row, children: [
-            (0, react_jsx_runtime.jsxs)("div", { style: S.head, children: [
-              (0, react_jsx_runtime.jsx)("label", { style: S.label, children: T.orgLabel })
-            ] }),
-            (0, react_jsx_runtime.jsx)("div", { style: S.inputRow, children:
-              (0, react_jsx_runtime.jsx)("input", { type: "text", style: S.input, placeholder: T.orgPlaceholder, value: orgDraft, onChange: (e) => setOrgDraft(e.target.value) })
-            }),
-            (0, react_jsx_runtime.jsx)("p", { style: S.hint, children: T.orgHint })
-          ] }),
           (0, react_jsx_runtime.jsxs)("div", { style: S.footer, children: [
             (0, react_jsx_runtime.jsx)("button", { style: S.button, disabled: saving, onClick: onSave, children: saving ? T.saving : T.save }),
             saved ? (0, react_jsx_runtime.jsx)("p", { style: S.msg, children: T.saved }) : null,
@@ -286,7 +266,7 @@ window.__ModuleLoader__.load({
       const { api } = ctx.get("connection");
       const face = {
         describe: async () => {
-          // AK/SK 走凭证库（只返回 configured）；URL/orgId 走 settings namespace（非 secret，返回明文）。
+          // AK/SK 走凭证库（只返回 configured）；URL 走 settings namespace（非 secret，返回明文）。
           const [credRes, setRes] = await Promise.all([
             api.credentials.describe({ refs: [AK_REF, SK_REF] }),
             api.settings?.describe ? api.settings.describe({}) : Promise.resolve(null),
@@ -294,20 +274,17 @@ window.__ModuleLoader__.load({
           const creds = credRes?.result?.value?.credentials ?? {};
           const jsNs = (setRes?.result?.value?.namespaces ?? []).find((n) => n?.ns === SETTINGS_NS);
           const baseUrl = typeof jsNs?.value?.baseUrl === "string" ? jsNs.value.baseUrl : "";
-          const orgId = typeof jsNs?.value?.orgId === "string" ? jsNs.value.orgId : "";
           return {
             akConfigured: creds[AK_REF]?.configured ?? false,
             skConfigured: creds[SK_REF]?.configured ?? false,
             baseConfigured: Boolean(baseUrl),
             baseUrl,
-            orgId,
           };
         },
         setAk: (value) => api.credentials.set({ ref: AK_REF, value }),
         setSk: (value) => api.credentials.set({ ref: SK_REF, value }),
-        // URL/orgId 存 settings namespace：update 做 deep-merge，不动其它字段。
+        // URL 存 settings namespace：update 做 deep-merge，不动其它字段。
         setBaseUrl: (value) => api.settings.update({ ns: SETTINGS_NS, patch: { baseUrl: value } }),
-        setOrgId: (value) => api.settings.update({ ns: SETTINGS_NS, patch: { orgId: value } }),
         // AK/SK 移除走凭证库。
         unsetAk: () => api.credentials.unset({ ref: AK_REF }),
         unsetSk: () => api.credentials.unset({ ref: SK_REF }),

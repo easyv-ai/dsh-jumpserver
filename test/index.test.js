@@ -253,6 +253,5 @@ test('Config schema exposes documented defaults', () => {
   assert.equal(config.baseUrl, '')
   assert.equal(config.akRef, 'JUMPSERVER_ACCESS_KEY_ID')
   assert.equal(config.skRef, 'JUMPSERVER_ACCESS_KEY_SECRET')
-  assert.equal(config.orgId, '')
   assert.equal(config.allowInsecureHttp, true)
 })

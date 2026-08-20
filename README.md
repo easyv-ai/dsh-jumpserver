@@ -2,14 +2,14 @@
 
 [简体中文](./README.zh-CN.md)
 
-A DeepSeek Harness plugin for querying JumpServer assets through conversation, authenticated with a JumpServer AccessKeyID/AccessKeySecret pair (HTTP Signature).
+A DeepSeek Harness plugin for querying and managing JumpServer assets through conversation, authenticated with a JumpServer AccessKeyID/AccessKeySecret pair (HTTP Signature).
 
-> Project status: v0.2.0. Read-only asset, user, account, permission, and session lookups are implemented; write/destructive operations (create, update, delete, password reset, permission grants) are intentionally out of scope for now given JumpServer's role as a bastion/PAM system.
+> Project status: v0.3.0. Read-only asset, user, account, permission, and session lookups are implemented, plus create/update/delete for assets behind a mandatory native user-approval prompt. Write operations on users, accounts, and permissions (password reset, permission grants, etc.) remain intentionally out of scope for now given JumpServer's role as a bastion/PAM system.
 
 ## Why dsh-jumpserver
 
 - List and inspect JumpServer assets, users, accounts, asset-permission rules, and terminal sessions by keyword or filter.
-- Read-only: this plugin never creates, modifies, or deletes JumpServer data.
+- Create, update, and delete assets — every write requires an explicit native user-approval prompt before it runs; the model cannot bypass it.
 - Never exposes secrets: account secrets/passphrases and user passwords/public keys/MFA secrets are stripped before a response reaches the model, even if the JumpServer API includes them.
 - Authenticate with a JumpServer AccessKeyID/AccessKeySecret pair using JumpServer's native HTTP Signature scheme (`hmac-sha256`), the same mechanism documented in JumpServer's own developer docs.
 - Keep the AccessKeySecret in the local DSH credential store; it is never echoed back to the browser.
@@ -71,7 +71,7 @@ Create the AccessKey under a JumpServer account that only has read access to the
 
 ## Tools
 
-All tools are read-only and paginate with `limit` (1-100, default 20) / `offset` (default 0) where applicable.
+Read-only tools paginate with `limit` (1-100, default 20) / `offset` (default 0) where applicable.
 
 | Tool | Behavior |
 | --- | --- |
@@ -83,8 +83,15 @@ All tools are read-only and paginate with `limit` (1-100, default 20) / `offset`
 | `jumpserver_get_account` | Gets full detail for one account by `id`. Never returns the secret or passphrase. |
 | `jumpserver_list_permissions` | Lists asset-permission rules, optionally filtered by `userId` or `assetId`. |
 | `jumpserver_list_sessions` | Lists terminal (audit) sessions, optionally filtered by `user`, `asset`, or `isFinished`. |
+| `jumpserver_create_asset` | **Write.** Creates an asset (`name`, `address`, `platform` required; `comment`, `isActive` optional). Requires native user approval. |
+| `jumpserver_update_asset` | **Write.** Updates an existing asset by `id`; only the fields you pass are changed. Requires native user approval. |
+| `jumpserver_delete_asset` | **Write, irreversible.** Permanently deletes an asset by `id`. Requires native user approval. |
 
-Write and destructive operations (create/update/delete assets, users, accounts, permissions; password resets; session termination; ticket approval) are not implemented. Given JumpServer's role as a bastion/PAM system, adding them would require an explicit native user-approval gate for every call, similar to dsh-grafana's write-tool approval flow — this is a deliberate scope decision, not an oversight.
+User, account, and permission write operations (create/delete users, password reset, permission grants, session termination, ticket approval) are not implemented. Given JumpServer's role as a bastion/PAM system, these affect who can log in and what they can access — a materially higher blast radius than asset records — and are deliberately deferred pending a separate decision.
+
+### Write-tool approval
+
+Every call to `jumpserver_create_asset`, `jumpserver_update_asset`, or `jumpserver_delete_asset` is intercepted by a `tools/pre-execute` gate (the same pattern dsh-grafana uses for `grafana_push`) and always downgraded to an explicit native approval prompt — the model cannot execute a write without it. The prompt shows the operation and the fields being changed; for updates, only the fields you pass are sent, and for deletes the asset's current name/address are read back once the delete succeeds. `jumpserver_update_asset` and `jumpserver_delete_asset` both re-check that the asset exists (an extra `GET`) before attempting the write, and fail loudly instead of silently doing nothing if it's missing.
 
 ## Security and data boundaries
 

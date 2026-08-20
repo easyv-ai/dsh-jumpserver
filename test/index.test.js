@@ -10,6 +10,7 @@ function execution() {
 function createContext({ baseUrl = 'https://jumpserver.example.com', ak = 'test-ak', sk = 'test-sk' } = {}) {
   const tools = []
   const sections = []
+  const listeners = new Map()
   const ctx = {
     credentials: {
       async resolve(ref) {
@@ -20,6 +21,10 @@ function createContext({ baseUrl = 'https://jumpserver.example.com', ak = 'test-
     },
     // 无 settings 服务时注入回调不会执行（与真实 cordis 行为一致）。
     inject() {},
+    on(name, listener) {
+      listeners.set(name, listener)
+      return () => listeners.delete(name)
+    },
     systemPrompt: {
       section(section) { sections.push(section) },
     },
@@ -28,7 +33,7 @@ function createContext({ baseUrl = 'https://jumpserver.example.com', ak = 'test-
     },
   }
   apply(ctx, { baseUrl })
-  return { sections, tools }
+  return { sections, tools, listeners }
 }
 
 function toolByName(tools, name) {
@@ -104,7 +109,7 @@ test('gmtNow returns an RFC 1123 / GMT formatted date string', () => {
   assert.match(internals.gmtNow(), /^[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT$/)
 })
 
-test('apply registers all read-only tools and a system prompt section', () => {
+test('apply registers all tools (read-only + write) and a system prompt section', () => {
   const { sections, tools } = createContext()
   assert.deepEqual(tools.map((tool) => tool.name), [
     'jumpserver_list_assets',
@@ -115,6 +120,9 @@ test('apply registers all read-only tools and a system prompt section', () => {
     'jumpserver_get_account',
     'jumpserver_list_permissions',
     'jumpserver_list_sessions',
+    'jumpserver_create_asset',
+    'jumpserver_update_asset',
+    'jumpserver_delete_asset',
   ])
   assert.equal(sections.length, 1)
   assert.equal(sections[0].name, 'tool:jumpserver')
@@ -363,6 +371,178 @@ test('jumpserver_list_sessions filters by user/asset/isFinished and formats rows
   }
 })
 
+test('WRITE_TOOL_NAMES lists exactly the three asset write tools', () => {
+  assert.deepEqual([...internals.WRITE_TOOL_NAMES].sort(), [
+    'jumpserver_create_asset',
+    'jumpserver_delete_asset',
+    'jumpserver_update_asset',
+  ])
+})
+
+test('approvalReasonForWrite describes create/update/delete from arguments only (no extra fetch)', () => {
+  assert.match(
+    internals.approvalReasonForWrite({ name: 'jumpserver_create_asset', arguments: { name: 'web-02', address: '10.0.0.2', platform: 'Linux' } }),
+    /Create a new JumpServer asset: name="web-02", address="10\.0\.0\.2", platform="Linux"/,
+  )
+  assert.match(
+    internals.approvalReasonForWrite({ name: 'jumpserver_update_asset', arguments: { id: 'abc-123', comment: 'retiring soon' } }),
+    /Update JumpServer asset id=abc-123\. Changes: comment="retiring soon"\./,
+  )
+  assert.match(
+    internals.approvalReasonForWrite({ name: 'jumpserver_delete_asset', arguments: { id: 'abc-123' } }),
+    /PERMANENTLY DELETE JumpServer asset id=abc-123.*cannot be undone/,
+  )
+})
+
+test('the tools/pre-execute gate forces every write tool to "ask" and leaves read-only tools untouched', async () => {
+  const { listeners } = createContext()
+  const gate = listeners.get('tools/pre-execute')
+  assert.equal(typeof gate, 'function')
+
+  const readDecision = await gate(
+    { name: 'jumpserver_list_assets', arguments: {} },
+    async () => ({ kind: 'allow' }),
+  )
+  assert.deepEqual(readDecision, { kind: 'allow' })
+
+  const writeDecision = await gate(
+    { name: 'jumpserver_delete_asset', arguments: { id: 'abc-123' } },
+    async () => ({ kind: 'allow' }),
+  )
+  assert.equal(writeDecision.kind, 'ask')
+  assert.match(writeDecision.reason, /PERMANENTLY DELETE/)
+
+  // 如果上游网关已经拒绝，本网关不应该把拒绝改写成 ask。
+  const deniedDecision = await gate(
+    { name: 'jumpserver_create_asset', arguments: {} },
+    async () => ({ kind: 'deny', reason: 'blocked upstream' }),
+  )
+  assert.deepEqual(deniedDecision, { kind: 'deny', reason: 'blocked upstream' })
+})
+
+test('jumpserver_create_asset requires name/address/platform and POSTs only writable fields', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    return jsonResponse({ id: 'new-1', name: 'web-02', address: '10.0.0.2', platform: 'Linux', is_active: true }, 201)
+  }
+  try {
+    const { tools } = createContext()
+    const create = toolByName(tools, 'jumpserver_create_asset')
+    const output = await create.execute({ name: 'web-02', address: '10.0.0.2', platform: 'Linux', comment: 'new box' }, execution())
+    assert.match(output, /Asset created/)
+    assert.match(output, /id="new-1"/)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].init.method, 'POST')
+    assert.equal(calls[0].init.headers['Content-Type'], 'application/json')
+    const body = JSON.parse(calls[0].init.body)
+    assert.deepEqual(body, { name: 'web-02', address: '10.0.0.2', platform: 'Linux', comment: 'new box' })
+
+    await assert.rejects(create.execute({ address: '10.0.0.2', platform: 'Linux' }, execution()), /missing required property "name"/)
+    await assert.rejects(create.execute({ name: 'web-02', platform: 'Linux' }, execution()), /missing required property "address"/)
+    await assert.rejects(create.execute({ name: 'web-02', address: '10.0.0.2' }, execution()), /missing required property "platform"/)
+    // 框架只校验字段是否存在，不校验是否为空字符串；这里靠我们自己的检查兜底。
+    await assert.rejects(create.execute({ name: '   ', address: '10.0.0.2', platform: 'Linux' }, execution()), /name is required/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_update_asset checks existence first, then PATCHes only the provided fields', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    if ((init.method ?? 'GET') === 'GET') {
+      return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'web-01', address: '10.0.0.1', platform: 'Linux', is_active: true })
+    }
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'web-01-renamed', address: '10.0.0.1', platform: 'Linux', is_active: true, comment: '' })
+  }
+  try {
+    const { tools } = createContext()
+    const update = toolByName(tools, 'jumpserver_update_asset')
+    const output = await update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'web-01-renamed' }, execution())
+    assert.match(output, /Asset updated/)
+    assert.match(output, /name="web-01-renamed"/)
+    assert.equal(calls.length, 2)
+    assert.equal(calls[0].init.method ?? 'GET', 'GET')
+    assert.equal(calls[1].init.method, 'PATCH')
+    const body = JSON.parse(calls[1].init.body)
+    assert.deepEqual(body, { name: 'web-01-renamed' })
+
+    await assert.rejects(update.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution()), /Provide at least one field/)
+    await assert.rejects(update.execute({ id: 'not-a-uuid', name: 'x' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_update_asset fails clearly when the asset does not exist, without attempting the PATCH', async () => {
+  const originalFetch = globalThis.fetch
+  let patchCount = 0
+  globalThis.fetch = async (_url, init = {}) => {
+    if ((init.method ?? 'GET') === 'PATCH') { patchCount += 1; return jsonResponse({}, 200) }
+    return jsonResponse({ detail: 'Not found.' }, 404)
+  }
+  try {
+    const { tools } = createContext()
+    const update = toolByName(tools, 'jumpserver_update_asset')
+    await assert.rejects(
+      update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'x' }, execution()),
+      /404/,
+    )
+    assert.equal(patchCount, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_delete_asset checks existence first, reports name/address, and rejects malformed ids', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    if ((init.method ?? 'GET') === 'DELETE') return new Response(null, { status: 204 })
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'web-01', address: '10.0.0.1' })
+  }
+  try {
+    const { tools } = createContext()
+    const del = toolByName(tools, 'jumpserver_delete_asset')
+    const output = await del.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(output, /Asset deleted/)
+    assert.match(output, /name="web-01"/)
+    assert.match(output, /address="10\.0\.0\.1"/)
+    assert.equal(calls.length, 2)
+    assert.equal(calls[0].init.method ?? 'GET', 'GET')
+    assert.equal(calls[1].init.method, 'DELETE')
+
+    await assert.rejects(del.execute({ id: 'not-a-uuid' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_delete_asset fails clearly when the asset does not exist, without attempting the DELETE', async () => {
+  const originalFetch = globalThis.fetch
+  let deleteCount = 0
+  globalThis.fetch = async (_url, init = {}) => {
+    if ((init.method ?? 'GET') === 'DELETE') { deleteCount += 1; return new Response(null, { status: 204 }) }
+    return jsonResponse({ detail: 'Not found.' }, 404)
+  }
+  try {
+    const { tools } = createContext()
+    const del = toolByName(tools, 'jumpserver_delete_asset')
+    await assert.rejects(
+      del.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution()),
+      /404/,
+    )
+    assert.equal(deleteCount, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 function createSettingsContext(userSection = {}) {
   const tools = []
   let section = { ...userSection }
@@ -375,6 +555,7 @@ function createSettingsContext(userSection = {}) {
         return undefined
       },
     },
+    on() { return () => {} },
     inject(services, callback) {
       if (!services.includes('settings')) return
       callback({

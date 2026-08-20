@@ -2,14 +2,14 @@
 
 [English](./README.md)
 
-一个 DeepSeek Harness 插件，通过对话查询 JumpServer 资产，使用 JumpServer 的 AccessKeyID/AccessKeySecret（HTTP Signature）进行鉴权。
+一个 DeepSeek Harness 插件，通过对话查询并管理 JumpServer 资产，使用 JumpServer 的 AccessKeyID/AccessKeySecret（HTTP Signature）进行鉴权。
 
-> 项目状态：v0.2.0。已实现资产、用户、账号、授权规则、会话的只读查询；考虑到 JumpServer 作为堡垒机/PAM 系统的角色，写操作和破坏性操作（创建、更新、删除、重置密码、授权变更）目前有意未实现。
+> 项目状态：v0.3.0。已实现资产、用户、账号、授权规则、会话的只读查询，以及资产的创建/更新/删除（均需经过强制的原生用户审批）。用户、账号、授权规则相关的写操作（重置密码、授权变更等），考虑到 JumpServer 作为堡垒机/PAM 系统的角色，目前有意保留不实现。
 
 ## 为什么用 dsh-jumpserver
 
 - 按关键字或过滤条件查询 JumpServer 的资产、用户、账号、资产授权规则和终端会话。
-- 只读：本插件不会创建、修改或删除任何 JumpServer 数据。
+- 创建、更新、删除资产——每次写操作执行前都必须经过明确的原生用户审批提示，模型无法绕过。
 - 绝不泄露敏感信息：账号的密钥/密钥密码，以及用户的密码/公钥/MFA 密钥，在返回给模型前会被逐字段剔除，即便 JumpServer API 本身返回了这些字段。
 - 使用 JumpServer 官方开发文档中记录的 AccessKeyID/AccessKeySecret 签名机制（`hmac-sha256` HTTP Signature）进行鉴权。
 - AccessKeySecret 保存在本地 DSH 凭证库中，永远不会被回显到浏览器。
@@ -71,7 +71,7 @@ allowInsecureHttp: false
 
 ## 工具
 
-所有工具均为只读，涉及分页的接口支持 `limit`（1-100，默认 20）/ `offset`（默认 0）。
+只读工具中涉及分页的接口支持 `limit`（1-100，默认 20）/ `offset`（默认 0）。
 
 | 工具 | 行为 |
 | --- | --- |
@@ -83,8 +83,15 @@ allowInsecureHttp: false
 | `jumpserver_get_account` | 按 `id` 获取单个账号的完整详情。绝不返回密钥或密钥密码。 |
 | `jumpserver_list_permissions` | 列出资产授权规则，可按 `userId` 或 `assetId` 过滤。 |
 | `jumpserver_list_sessions` | 列出终端（审计）会话，可按 `user`、`asset` 或 `isFinished` 过滤。 |
+| `jumpserver_create_asset` | **写操作。** 创建资产（必填 `name`、`address`、`platform`；可选 `comment`、`isActive`）。需要原生用户审批。 |
+| `jumpserver_update_asset` | **写操作。** 按 `id` 更新已有资产；只会修改你传入的字段。需要原生用户审批。 |
+| `jumpserver_delete_asset` | **写操作，不可逆。** 按 `id` 永久删除资产。需要原生用户审批。 |
 
-写操作和破坏性操作（创建/更新/删除资产、用户、账号、授权规则；重置密码；终止会话；工单审批）尚未实现。考虑到 JumpServer 作为堡垒机/PAM 系统的角色，要添加这些操作需要为每次调用设置明确的原生用户审批网关（类似 dsh-grafana 写操作的审批流程），这是有意的范围决策，不是遗漏。
+用户、账号、授权规则相关的写操作（创建/删除用户、重置密码、授权变更、终止会话、工单审批）尚未实现。考虑到 JumpServer 作为堡垒机/PAM 系统的角色，这些操作直接影响谁能登录、谁能访问什么资产——影响范围明显高于资产记录本身——因此有意延后，留待单独决策。
+
+### 写操作审批机制
+
+对 `jumpserver_create_asset`、`jumpserver_update_asset`、`jumpserver_delete_asset` 的每一次调用都会被 `tools/pre-execute` 网关拦截（与 dsh-grafana 拦截 `grafana_push` 是同一套模式），并始终降级为明确的原生审批提示——模型无法在没有审批的情况下执行写操作。审批提示会展示具体操作和将被修改的字段；更新时只会发送你传入的字段，删除成功后会读回资产当时的名称/地址用于最终确认。`jumpserver_update_asset` 和 `jumpserver_delete_asset` 在执行写操作前都会先重新确认资产是否存在（多发一次 `GET`），如果资产已不存在会明确报错，而不是静默不做任何事。
 
 ## 安全与数据边界
 

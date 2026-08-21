@@ -4,13 +4,13 @@
 
 一个 DeepSeek Harness 插件，通过对话查询并管理 JumpServer 资产，使用 JumpServer 的 AccessKeyID/AccessKeySecret（HTTP Signature）进行鉴权。
 
-> 项目状态：v0.7.0。已实现资产、用户、账号、授权规则、会话、命令审计、用户组的只读查询，以及资产、账号、用户、资产授权规则、用户组的创建/更新/删除，以及用户的密码/MFA/SSH 密钥重置——均需经过强制的原生用户审批。考虑到 JumpServer 作为堡垒机/PAM 系统的角色，终止会话和工单审批目前有意保留不实现。
+> 项目状态：v0.8.0。已实现资产、用户、账号、授权规则、会话、命令审计、用户组、命令过滤规则的只读查询，以及资产、账号、用户、资产授权规则、用户组、命令组、命令过滤规则的创建/更新/删除，以及用户的密码/MFA/SSH 密钥重置——均需经过强制的原生用户审批。考虑到 JumpServer 作为堡垒机/PAM 系统的角色，终止会话和工单审批目前有意保留不实现。
 
 ## 为什么用 dsh-jumpserver
 
-- 按关键字或过滤条件查询 JumpServer 的资产、用户、账号、资产授权规则、终端会话、已执行命令和用户组。
-- 创建、更新、删除资产、账号、用户、资产授权规则、用户组，以及重置用户的密码/MFA/SSH 密钥——每次写操作执行前都必须经过明确的原生用户审批提示，模型无法绕过。
-- 拒绝删除或重置超级管理员（管理员）账号的密码，也拒绝创建"授予所有权限"式的宽泛资产授权规则——这两点都由工具自身强制执行，不只是写在文档里的约定。
+- 按关键字或过滤条件查询 JumpServer 的资产、用户、账号、资产授权规则、终端会话、已执行命令、用户组和命令过滤规则。
+- 创建、更新、删除资产、账号、用户、资产授权规则、用户组、命令组、命令过滤规则，以及重置用户的密码/MFA/SSH 密钥——每次写操作执行前都必须经过明确的原生用户审批提示，模型无法绕过。
+- 拒绝删除或重置超级管理员（管理员）账号的密码，也拒绝创建"授予所有权限"式的宽泛资产授权规则或命令过滤规则——这两点都由工具自身强制执行，不只是写在文档里的约定。
 - 只读查询绝不泄露敏感信息：账号的密钥/密钥密码，以及用户的密码/公钥/MFA 密钥，在返回给模型前会被逐字段剔除，即便 JumpServer API 本身返回了这些字段。
 - 使用 JumpServer 官方开发文档中记录的 AccessKeyID/AccessKeySecret 签名机制（`hmac-sha256` HTTP Signature）进行鉴权。
 - AccessKeySecret 保存在本地 DSH 凭证库中，永远不会被回显到浏览器。
@@ -104,6 +104,16 @@ allowInsecureHttp: false
 | `jumpserver_create_user_group` | **写操作。** 创建用户组（必填 `name`；可选 `users`、`comment`）。需要原生用户审批。 |
 | `jumpserver_update_user_group` | **写操作。** 按 `id` 更新已有用户组；只会修改你传入的字段。若传入 `users`，必须非空。需要原生用户审批。 |
 | `jumpserver_delete_user_group` | **写操作，不可逆。** 按 `id` 永久删除用户组；成员用户本身不会被删除，但引用该组的授权规则会失去对应授权。需要原生用户审批。 |
+| `jumpserver_list_command_groups` | 按可选的 `search` 关键字列出命令组（命名的命令匹配规则集合）。命令组本身不生效，需要绑定到命令过滤规则上。 |
+| `jumpserver_get_command_group` | 按 `id` 获取单个命令组的完整详情，包含完整的匹配内容。 |
+| `jumpserver_create_command_group` | **写操作。** 创建命令组（必填 `name`、`content`；可选 `type`、`ignoreCase`、`comment`）。需要原生用户审批。 |
+| `jumpserver_update_command_group` | **写操作。** 按 `id` 更新已有命令组；只会修改你传入的字段。需要原生用户审批。 |
+| `jumpserver_delete_command_group` | **写操作，不可逆。** 按 `id` 永久删除命令组；绑定该组的命令过滤规则会失去对应匹配规则。需要原生用户审批。 |
+| `jumpserver_list_command_filters` | 按可选的 `search` 关键字列出命令过滤规则（对匹配命令进行拒绝/告警/接受的安全规则）。 |
+| `jumpserver_get_command_filter` | 按 `id` 获取单个命令过滤规则的完整详情，包含其用户/资产/账号范围和绑定的命令组。 |
+| `jumpserver_create_command_filter` | **写操作。** 创建命令过滤规则（必填 `name`、`users`、`assets`、`accounts`、`commandGroupIds`，均须为非空 UUID 数组；可选 `action`——`reject`/`warning`/`accept`，默认 `reject`——`priority`、`comment`、`isActive`）。拒绝"全部用户"/"全部资产"/"全部账号"式的宽泛范围——不提供这类选项。将 `action` 设为 `accept` 会在审批提示里被标记为安全降级。需要原生用户审批。 |
+| `jumpserver_update_command_filter` | **写操作。** 按 `id` 更新已有规则；只会修改你传入的字段。传入的任何范围数组字段（`users`、`assets`、`accounts`、`commandGroupIds`）都必须非空。将 `action` 改为 `accept` 会在审批提示里被标记为安全降级。需要原生用户审批。 |
+| `jumpserver_delete_command_filter` | **写操作，不可逆。** 按 `id` 永久删除命令过滤规则。审批提示会展示该规则删除前的当前 `action`（在审批前实时查询），方便你在批准前看清是否正在移除一条生效中的 `reject`/`warning` 防护规则。需要原生用户审批。 |
 
 终止会话和工单审批尚未实现，目前也没有计划实现——详见下方"范围之外"。
 

@@ -140,6 +140,16 @@ test('apply registers all tools (read-only + write) and a system prompt section'
     'jumpserver_create_user_group',
     'jumpserver_update_user_group',
     'jumpserver_delete_user_group',
+    'jumpserver_list_command_groups',
+    'jumpserver_get_command_group',
+    'jumpserver_create_command_group',
+    'jumpserver_update_command_group',
+    'jumpserver_delete_command_group',
+    'jumpserver_list_command_filters',
+    'jumpserver_get_command_filter',
+    'jumpserver_create_command_filter',
+    'jumpserver_update_command_filter',
+    'jumpserver_delete_command_filter',
   ])
   assert.equal(sections.length, 1)
   assert.equal(sections[0].name, 'tool:jumpserver')
@@ -388,15 +398,19 @@ test('jumpserver_list_sessions filters by user/asset/isFinished and formats rows
   }
 })
 
-test('WRITE_TOOL_NAMES lists exactly the seventeen write tools', () => {
+test('WRITE_TOOL_NAMES lists exactly the twenty-three write tools', () => {
   assert.deepEqual([...internals.WRITE_TOOL_NAMES].sort(), [
     'jumpserver_create_account',
     'jumpserver_create_asset',
+    'jumpserver_create_command_filter',
+    'jumpserver_create_command_group',
     'jumpserver_create_permission',
     'jumpserver_create_user',
     'jumpserver_create_user_group',
     'jumpserver_delete_account',
     'jumpserver_delete_asset',
+    'jumpserver_delete_command_filter',
+    'jumpserver_delete_command_group',
     'jumpserver_delete_permission',
     'jumpserver_delete_user',
     'jumpserver_delete_user_group',
@@ -404,6 +418,8 @@ test('WRITE_TOOL_NAMES lists exactly the seventeen write tools', () => {
     'jumpserver_reset_user_ssh_key',
     'jumpserver_update_account',
     'jumpserver_update_asset',
+    'jumpserver_update_command_filter',
+    'jumpserver_update_command_group',
     'jumpserver_update_permission',
     'jumpserver_update_user',
     'jumpserver_update_user_group',
@@ -1358,6 +1374,369 @@ test('the tools/pre-execute gate also forces user-group write tools to "ask", an
   }
 
   for (const name of ['jumpserver_list_commands', 'jumpserver_list_user_groups', 'jumpserver_get_user_group']) {
+    const decision = await gate({ name, arguments: {} }, async () => ({ kind: 'allow' }))
+    assert.deepEqual(decision, { kind: 'allow' }, `${name} is read-only and should not require approval`)
+  }
+})
+
+test('requireIdsScope wraps a non-empty UUID array into {type: "ids", ids: [...]} and rejects broad/malformed input', () => {
+  assert.deepEqual(
+    internals.requireIdsScope(['123e4567-e89b-12d3-a456-426614174000'], 'users'),
+    { type: 'ids', ids: ['123e4567-e89b-12d3-a456-426614174000'] },
+  )
+  assert.throws(() => internals.requireIdsScope([], 'users'), /non-empty array/)
+  assert.throws(() => internals.requireIdsScope({ type: 'all' }, 'users'), /specific list of JumpServer UUIDs/)
+  assert.throws(() => internals.requireIdsScope('all', 'users'), /specific list of JumpServer UUIDs/)
+  assert.throws(() => internals.requireIdsScope(['not-a-uuid'], 'users'), /valid JumpServer UUID/)
+})
+
+test('requireAccountIds rejects "@ALL" (case-insensitive) and empty input, accepts specific UUIDs', () => {
+  assert.deepEqual(
+    internals.requireAccountIds(['123e4567-e89b-12d3-a456-426614174000'], 'accounts'),
+    ['123e4567-e89b-12d3-a456-426614174000'],
+  )
+  assert.throws(() => internals.requireAccountIds(['@ALL'], 'accounts'), /must not include "@ALL"/)
+  assert.throws(() => internals.requireAccountIds(['@all'], 'accounts'), /must not include "@ALL"/)
+  assert.throws(() => internals.requireAccountIds([], 'accounts'), /non-empty array/)
+  assert.throws(() => internals.requireAccountIds(undefined, 'accounts'), /non-empty array/)
+})
+
+test('scopeSummary and accountsSummary format the JumpServer ACL scope-selector shape for display', () => {
+  assert.equal(internals.scopeSummary({ type: 'all' }), 'all')
+  assert.equal(internals.scopeSummary({ type: 'ids', ids: ['a', 'b'] }), '2 specific')
+  assert.equal(internals.accountsSummary(['@ALL']), 'all')
+  assert.equal(internals.accountsSummary(['id1', 'id2']), '2 specific')
+})
+
+test('jumpserver_list_command_groups and jumpserver_get_command_group format results and reject malformed ids', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    if (new URL(String(url)).pathname === '/api/v1/acls/command-groups/') {
+      return jsonResponse({ count: 1, results: [{ id: 'g1', name: '危险命令', type: { value: 'command', label: '命令' }, ignore_case: true }] })
+    }
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: '危险命令', type: { value: 'command', label: '命令' }, content: 'rm -rf *\nshutdown', ignore_case: true, comment: '' })
+  }
+  try {
+    const { tools } = createContext()
+    const list = toolByName(tools, 'jumpserver_list_command_groups')
+    const listOutput = await list.execute({}, execution())
+    assert.match(listOutput, /name="危险命令"/)
+
+    const get = toolByName(tools, 'jumpserver_get_command_group')
+    const getOutput = await get.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(getOutput, /content="rm -rf \*\\nshutdown"/)
+
+    await assert.rejects(get.execute({ id: 'not-a-uuid' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_create_command_group requires name/content and POSTs only writable fields', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    return jsonResponse({ id: 'g1', name: '危险命令', type: { value: 'command', label: '命令' } }, 201)
+  }
+  try {
+    const { tools } = createContext()
+    const create = toolByName(tools, 'jumpserver_create_command_group')
+    const output = await create.execute({ name: '危险命令', content: 'rm -rf *', ignoreCase: true }, execution())
+    assert.match(output, /Command group created/)
+
+    const body = JSON.parse(calls[0].init.body)
+    assert.deepEqual(body, { name: '危险命令', content: 'rm -rf *', ignore_case: true })
+
+    await assert.rejects(create.execute({ content: 'x' }, execution()), /missing required property "name"/)
+    await assert.rejects(create.execute({ name: 'x' }, execution()), /missing required property "content"/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_update_command_group checks existence first and jumpserver_delete_command_group reports the name', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    if ((init.method ?? 'GET') === 'PATCH') return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: '危险命令-v2', type: { value: 'command', label: '命令' } })
+    if ((init.method ?? 'GET') === 'DELETE') return new Response(null, { status: 204 })
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: '危险命令' })
+  }
+  try {
+    const { tools } = createContext()
+    const update = toolByName(tools, 'jumpserver_update_command_group')
+    const updateOutput = await update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', name: '危险命令-v2' }, execution())
+    assert.match(updateOutput, /Command group updated/)
+    await assert.rejects(update.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution()), /Provide at least one field/)
+
+    const del = toolByName(tools, 'jumpserver_delete_command_group')
+    const deleteOutput = await del.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(deleteOutput, /Command group deleted/)
+    assert.match(deleteOutput, /name="危险命令"/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_list_command_filters and jumpserver_get_command_filter format the ACL scope selector for display', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    if (new URL(String(url)).pathname === '/api/v1/acls/command-filter-acls/') {
+      return jsonResponse({
+        count: 1,
+        results: [{
+          id: 'f1', name: '全员禁止', priority: 50, action: { value: 'reject', label: '拒绝' },
+          users: { type: 'all' }, assets: { type: 'all' }, accounts: ['@ALL'],
+          command_groups: [{ id: 'g1', name: '危险命令' }], is_active: true,
+        }],
+      })
+    }
+    return jsonResponse({
+      id: '123e4567-e89b-12d3-a456-426614174000', name: '临时规则', priority: 5, action: { value: 'accept', label: '接受' },
+      users: { type: 'ids', ids: ['c39f134a-46ea-4306-9ca4-4eee4bae7b01'] }, assets: { type: 'all' }, accounts: ['@ALL'],
+      command_groups: [{ id: 'g1', name: '危险命令' }, { id: 'g2', name: '重启命令' }], is_active: true, comment: 'temp',
+    })
+  }
+  try {
+    const { tools } = createContext()
+    const list = toolByName(tools, 'jumpserver_list_command_filters')
+    const listOutput = await list.execute({}, execution())
+    assert.match(listOutput, /name="全员禁止"/)
+    assert.match(listOutput, /users="all"/)
+    assert.match(listOutput, /accounts="all"/)
+
+    const get = toolByName(tools, 'jumpserver_get_command_filter')
+    const getOutput = await get.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(getOutput, /users="1 specific"/)
+    assert.match(getOutput, /command_groups="危险命令,重启命令"/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_create_command_filter requires non-empty users/assets/accounts/commandGroupIds and rejects broad scope', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    return jsonResponse({ id: 'f1', name: 'dev-filter', action: { value: 'reject', label: '拒绝' }, users: { type: 'ids', ids: ['u1'] }, assets: { type: 'ids', ids: ['a1'] }, accounts: ['acc1'], is_active: true }, 201)
+  }
+  try {
+    const { tools } = createContext()
+    const create = toolByName(tools, 'jumpserver_create_command_filter')
+    const output = await create.execute({
+      name: 'dev-filter',
+      users: ['123e4567-e89b-12d3-a456-426614174000'],
+      assets: ['223e4567-e89b-12d3-a456-426614174000'],
+      accounts: ['323e4567-e89b-12d3-a456-426614174000'],
+      commandGroupIds: ['423e4567-e89b-12d3-a456-426614174000'],
+    }, execution())
+    assert.match(output, /Command filter created/)
+
+    const body = JSON.parse(calls[0].init.body)
+    assert.deepEqual(body, {
+      name: 'dev-filter',
+      users: { type: 'ids', ids: ['123e4567-e89b-12d3-a456-426614174000'] },
+      assets: { type: 'ids', ids: ['223e4567-e89b-12d3-a456-426614174000'] },
+      accounts: ['323e4567-e89b-12d3-a456-426614174000'],
+      command_groups: ['423e4567-e89b-12d3-a456-426614174000'],
+      action: 'reject',
+    })
+
+    // 缺少 commandGroupIds（框架必填校验）。
+    await assert.rejects(create.execute({
+      name: 'x', users: ['123e4567-e89b-12d3-a456-426614174000'], assets: ['223e4567-e89b-12d3-a456-426614174000'], accounts: ['323e4567-e89b-12d3-a456-426614174000'],
+    }, execution()), /missing required property "commandGroupIds"/)
+
+    // accounts 传 @ALL：拒绝。
+    await assert.rejects(create.execute({
+      name: 'x', users: ['123e4567-e89b-12d3-a456-426614174000'], assets: ['223e4567-e89b-12d3-a456-426614174000'],
+      accounts: ['@ALL'], commandGroupIds: ['423e4567-e89b-12d3-a456-426614174000'],
+    }, execution()), /must not include "@ALL"/)
+
+    // users 传空数组：拒绝。
+    await assert.rejects(create.execute({
+      name: 'x', users: [], assets: ['223e4567-e89b-12d3-a456-426614174000'],
+      accounts: ['323e4567-e89b-12d3-a456-426614174000'], commandGroupIds: ['423e4567-e89b-12d3-a456-426614174000'],
+    }, execution()), /non-empty array/)
+
+    await assert.rejects(create.execute({
+      name: 'x', users: ['123e4567-e89b-12d3-a456-426614174000'], assets: ['223e4567-e89b-12d3-a456-426614174000'],
+      accounts: ['323e4567-e89b-12d3-a456-426614174000'], commandGroupIds: ['423e4567-e89b-12d3-a456-426614174000'], action: 'bogus',
+    }, execution()), /action must be/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_update_command_filter checks existence first and rejects broad scope updates', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    if ((init.method ?? 'GET') === 'GET') return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: '临时规则' })
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: '临时规则', action: { value: 'accept', label: '接受' } })
+  }
+  try {
+    const { tools } = createContext()
+    const update = toolByName(tools, 'jumpserver_update_command_filter')
+    const output = await update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', action: 'accept' }, execution())
+    assert.match(output, /Command filter updated/)
+    const patchCall = calls.find((c) => c.init.method === 'PATCH')
+    assert.deepEqual(JSON.parse(patchCall.init.body), { action: 'accept' })
+
+    await assert.rejects(update.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution()), /Provide at least one field/)
+    await assert.rejects(update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', users: [] }, execution()), /non-empty array/)
+    await assert.rejects(update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', accounts: ['@ALL'] }, execution()), /must not include "@ALL"/)
+    await assert.rejects(update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', action: 'bogus' }, execution()), /action must be/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_update_command_filter fails clearly when the filter does not exist, without attempting the PATCH', async () => {
+  const originalFetch = globalThis.fetch
+  let patchCount = 0
+  globalThis.fetch = async (_url, init = {}) => {
+    if ((init.method ?? 'GET') === 'PATCH') { patchCount += 1; return jsonResponse({}, 200) }
+    return jsonResponse({ detail: 'Not found.' }, 404)
+  }
+  try {
+    const { tools } = createContext()
+    const update = toolByName(tools, 'jumpserver_update_command_filter')
+    await assert.rejects(
+      update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', action: 'accept' }, execution()),
+      /404/,
+    )
+    assert.equal(patchCount, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_delete_command_filter checks existence first and reports name/action, and rejects malformed ids', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    if ((init.method ?? 'GET') === 'DELETE') return new Response(null, { status: 204 })
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: '全员禁止', action: { value: 'reject', label: '拒绝' } })
+  }
+  try {
+    const { tools } = createContext()
+    const del = toolByName(tools, 'jumpserver_delete_command_filter')
+    const output = await del.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(output, /Command filter deleted/)
+    assert.match(output, /name="全员禁止"/)
+    assert.match(output, /action="拒绝"/)
+
+    await assert.rejects(del.execute({ id: 'not-a-uuid' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('approvalReasonForWrite flags action="accept" as a security downgrade for create/update command filter', () => {
+  const createReason = internals.approvalReasonForWrite({
+    name: 'jumpserver_create_command_filter',
+    arguments: { name: 'relaxed', action: 'accept', users: ['u1'], assets: ['a1'], accounts: ['acc1'] },
+  })
+  assert.match(createReason, /SECURITY NOTE/)
+
+  const updateAcceptReason = internals.approvalReasonForWrite({
+    name: 'jumpserver_update_command_filter',
+    arguments: { id: 'f1', action: 'accept' },
+  })
+  assert.match(updateAcceptReason, /SECURITY DOWNGRADE/)
+  assert.match(updateAcceptReason, /STOP blocking/)
+
+  const updateWarningReason = internals.approvalReasonForWrite({
+    name: 'jumpserver_update_command_filter',
+    arguments: { id: 'f1', action: 'warning' },
+  })
+  assert.match(updateWarningReason, /SECURITY NOTE/)
+
+  const updateRejectReason = internals.approvalReasonForWrite({
+    name: 'jumpserver_update_command_filter',
+    arguments: { id: 'f1', action: 'reject' },
+  })
+  assert.doesNotMatch(updateRejectReason, /SECURITY/)
+})
+
+test('approvalReasonForWrite warns about removing active protection when deleting a reject/warning command filter, based on __currentAction', () => {
+  const rejectReason = internals.approvalReasonForWrite({
+    name: 'jumpserver_delete_command_filter',
+    arguments: { id: 'f1', __currentAction: 'reject' },
+  })
+  assert.match(rejectReason, /SECURITY WARNING/)
+  assert.match(rejectReason, /REMOVES that command-blocking protection/)
+
+  const warningReason = internals.approvalReasonForWrite({
+    name: 'jumpserver_delete_command_filter',
+    arguments: { id: 'f1', __currentAction: 'warning' },
+  })
+  assert.match(warningReason, /SECURITY NOTE/)
+
+  const acceptReason = internals.approvalReasonForWrite({
+    name: 'jumpserver_delete_command_filter',
+    arguments: { id: 'f1', __currentAction: 'accept' },
+  })
+  assert.doesNotMatch(acceptReason, /SECURITY/)
+
+  const unknownReason = internals.approvalReasonForWrite({
+    name: 'jumpserver_delete_command_filter',
+    arguments: { id: 'f1' },
+  })
+  assert.match(unknownReason, /Could not confirm/)
+})
+
+test('the tools/pre-execute gate fetches the current action before approving a command-filter deletion, and does not block approval if the fetch fails', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', action: { value: 'reject', label: '拒绝' } })
+  try {
+    const { listeners } = createContext()
+    const gate = listeners.get('tools/pre-execute')
+    const decision = await gate(
+      { name: 'jumpserver_delete_command_filter', arguments: { id: '123e4567-e89b-12d3-a456-426614174000' } },
+      async () => ({ kind: 'allow' }),
+    )
+    assert.equal(decision.kind, 'ask')
+    assert.match(decision.reason, /SECURITY WARNING/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  globalThis.fetch = async () => { throw new Error('network down') }
+  try {
+    const { listeners } = createContext()
+    const gate = listeners.get('tools/pre-execute')
+    const decision = await gate(
+      { name: 'jumpserver_delete_command_filter', arguments: { id: '123e4567-e89b-12d3-a456-426614174000' } },
+      async () => ({ kind: 'allow' }),
+    )
+    assert.equal(decision.kind, 'ask')
+    assert.match(decision.reason, /Could not confirm/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('the tools/pre-execute gate also forces command group/filter write tools to "ask", and their reads are untouched', async () => {
+  const { listeners } = createContext()
+  const gate = listeners.get('tools/pre-execute')
+
+  const writeNames = [
+    'jumpserver_create_command_group', 'jumpserver_update_command_group', 'jumpserver_delete_command_group',
+    'jumpserver_create_command_filter', 'jumpserver_update_command_filter',
+  ]
+  for (const name of writeNames) {
+    const decision = await gate({ name, arguments: { id: 'x', name: 'x' } }, async () => ({ kind: 'allow' }))
+    assert.equal(decision.kind, 'ask', `${name} should require approval`)
+  }
+
+  for (const name of ['jumpserver_list_command_groups', 'jumpserver_get_command_group', 'jumpserver_list_command_filters', 'jumpserver_get_command_filter']) {
     const decision = await gate({ name, arguments: {} }, async () => ({ kind: 'allow' }))
     assert.deepEqual(decision, { kind: 'allow' }, `${name} is read-only and should not require approval`)
   }

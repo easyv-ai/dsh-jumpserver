@@ -4,13 +4,13 @@
 
 A DeepSeek Harness plugin for querying and managing JumpServer assets through conversation, authenticated with a JumpServer AccessKeyID/AccessKeySecret pair (HTTP Signature).
 
-> Project status: v0.7.0. Read-only asset, user, account, permission, session, command-audit, and user-group lookups are implemented, plus create/update/delete for assets, accounts, users, asset-permission rules, and user groups, and password/MFA/SSH-key resets for users — all behind a mandatory native user-approval prompt. Session termination and ticket approval remain intentionally out of scope given JumpServer's role as a bastion/PAM system.
+> Project status: v0.8.0. Read-only asset, user, account, permission, session, command-audit, user-group, and command-filter lookups are implemented, plus create/update/delete for assets, accounts, users, asset-permission rules, user groups, command groups, and command filters, and password/MFA/SSH-key resets for users — all behind a mandatory native user-approval prompt. Session termination and ticket approval remain intentionally out of scope given JumpServer's role as a bastion/PAM system.
 
 ## Why dsh-jumpserver
 
-- List and inspect JumpServer assets, users, accounts, asset-permission rules, terminal sessions, executed commands, and user groups by keyword or filter.
-- Create, update, and delete assets, accounts, users, asset-permission rules, and user groups, and password/MFA/SSH-key resets for users — every write requires an explicit native user-approval prompt before it runs; the model cannot bypass it.
-- Refuses to delete or reset the password of superuser (administrator) accounts, and refuses to create asset-permission rules with broad or "grant access to everything" matching — both are enforced by the tools themselves, not just documented as a convention.
+- List and inspect JumpServer assets, users, accounts, asset-permission rules, terminal sessions, executed commands, user groups, and command-filter rules by keyword or filter.
+- Create, update, and delete assets, accounts, users, asset-permission rules, user groups, command groups, and command filters, and password/MFA/SSH-key resets for users — every write requires an explicit native user-approval prompt before it runs; the model cannot bypass it.
+- Refuses to delete or reset the password of superuser (administrator) accounts, and refuses to create asset-permission rules or command filters with broad or "grant access to everything"/"all users"/"all assets" matching — both are enforced by the tools themselves, not just documented as a convention.
 - Never exposes secrets on read: account secrets/passphrases and user passwords/public keys/MFA secrets are stripped before a response reaches the model, even if the JumpServer API includes them.
 - Authenticate with a JumpServer AccessKeyID/AccessKeySecret pair using JumpServer's native HTTP Signature scheme (`hmac-sha256`), the same mechanism documented in JumpServer's own developer docs.
 - Keep the AccessKeySecret in the local DSH credential store; it is never echoed back to the browser.
@@ -104,6 +104,16 @@ Read-only tools paginate with `limit` (1-100, default 20) / `offset` (default 0)
 | `jumpserver_create_user_group` | **Write.** Creates a user group (`name` required; `users`, `comment` optional). Requires native user approval. |
 | `jumpserver_update_user_group` | **Write.** Updates an existing group by `id`; only the fields you pass are changed. If you pass `users`, it must be non-empty. Requires native user approval. |
 | `jumpserver_delete_user_group` | **Write, irreversible.** Permanently deletes a user group by `id`; member users themselves are not deleted, but any permission rules referencing the group lose that grant. Requires native user approval. |
+| `jumpserver_list_command_groups` | Lists command groups (named sets of command patterns), optionally filtered by a `search` keyword. A command group has no effect until bound to a command filter. |
+| `jumpserver_get_command_group` | Gets full detail for one command group by `id`, including its full pattern content. |
+| `jumpserver_create_command_group` | **Write.** Creates a command group (`name`, `content` required; `type`, `ignoreCase`, `comment` optional). Requires native user approval. |
+| `jumpserver_update_command_group` | **Write.** Updates an existing command group by `id`; only the fields you pass are changed. Requires native user approval. |
+| `jumpserver_delete_command_group` | **Write, irreversible.** Permanently deletes a command group by `id`; any command filter bound to it loses that matching rule. Requires native user approval. |
+| `jumpserver_list_command_filters` | Lists command filters (security rules that reject/warn on/accept matching commands), optionally filtered by a `search` keyword. |
+| `jumpserver_get_command_filter` | Gets full detail for one command filter by `id`, including its user/asset/account scope and bound command groups. |
+| `jumpserver_create_command_filter` | **Write.** Creates a command filter (`name`, `users`, `assets`, `accounts`, `commandGroupIds` required as non-empty UUID arrays; `action` — `reject`/`warning`/`accept`, default `reject` — `priority`, `comment`, `isActive` optional). Rejects "all users"/"all assets"/"all accounts" scope — there is no broad-match option. Setting `action` to `accept` is flagged in the approval prompt as a security downgrade. Requires native user approval. |
+| `jumpserver_update_command_filter` | **Write.** Updates an existing filter by `id`; only the fields you pass are changed. Any scope array you do pass (`users`, `assets`, `accounts`, `commandGroupIds`) must be non-empty. Changing `action` to `accept` is flagged in the approval prompt as a security downgrade. Requires native user approval. |
+| `jumpserver_delete_command_filter` | **Write, irreversible.** Permanently deletes a command filter by `id`. The approval prompt shows the rule's current `action` (fetched just before asking) so you can see whether you're removing an active `reject`/`warning` protection before approving. Requires native user approval. |
 
 Session termination and ticket approval are not implemented, and are not currently planned — see "Out of scope" below.
 

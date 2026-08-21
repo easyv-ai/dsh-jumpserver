@@ -1,6 +1,6 @@
 {
   "name": "dsh-jumpserver",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "JumpServer asset lookup for DeepSeek Harness: query assets via conversation using AccessKey/SecretKey signed requests",
   "type": "module",
   "main": "index.js",

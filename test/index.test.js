@@ -128,7 +128,9 @@ test('apply registers all tools (read-only + write) and a system prompt section'
     'jumpserver_delete_account',
     'jumpserver_create_user',
     'jumpserver_delete_user',
-    'jumpserver_reset_user_password',
+    'jumpserver_update_user',
+    'jumpserver_reset_user_mfa',
+    'jumpserver_reset_user_ssh_key',
     'jumpserver_create_permission',
     'jumpserver_update_permission',
     'jumpserver_delete_permission',
@@ -386,7 +388,7 @@ test('jumpserver_list_sessions filters by user/asset/isFinished and formats rows
   }
 })
 
-test('WRITE_TOOL_NAMES lists exactly the fifteen write tools', () => {
+test('WRITE_TOOL_NAMES lists exactly the seventeen write tools', () => {
   assert.deepEqual([...internals.WRITE_TOOL_NAMES].sort(), [
     'jumpserver_create_account',
     'jumpserver_create_asset',
@@ -398,10 +400,12 @@ test('WRITE_TOOL_NAMES lists exactly the fifteen write tools', () => {
     'jumpserver_delete_permission',
     'jumpserver_delete_user',
     'jumpserver_delete_user_group',
-    'jumpserver_reset_user_password',
+    'jumpserver_reset_user_mfa',
+    'jumpserver_reset_user_ssh_key',
     'jumpserver_update_account',
     'jumpserver_update_asset',
     'jumpserver_update_permission',
+    'jumpserver_update_user',
     'jumpserver_update_user_group',
   ])
 })
@@ -833,7 +837,125 @@ test('jumpserver_delete_user deletes a non-superuser and reports username/name',
   }
 })
 
-test('jumpserver_reset_user_password refuses to act on a superuser and never echoes the password', async () => {
+test('jumpserver_update_user refuses to change the password of a superuser, but allows other fields', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    if ((init.method ?? 'GET') === 'PATCH') return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', username: 'admin', name: 'Admin Renamed', is_active: true })
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', username: 'admin', is_superuser: true, is_active: true })
+  }
+  try {
+    const { tools } = createContext()
+    const update = toolByName(tools, 'jumpserver_update_user')
+    await assert.rejects(
+      update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', password: 'new-password-value' }, execution()),
+      /Refusing to reset the password.*superuser/,
+    )
+    assert.equal(calls.filter((c) => c.init.method === 'PUT').length, 0)
+
+    // 非密码字段仍然可以改超级管理员。
+    const output = await update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'Admin Renamed' }, execution())
+    assert.match(output, /User updated/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_update_user updates a non-superuser and never echoes a changed password', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    if ((init.method ?? 'GET') === 'PATCH') return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', username: 'bob', name: 'Bob Renamed', email: 'bob@example.com', is_active: true })
+    if ((init.method ?? 'GET') === 'PUT') return jsonResponse({}, 200)
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', username: 'bob', is_superuser: false, is_active: true })
+  }
+  try {
+    const { tools } = createContext()
+    const update = toolByName(tools, 'jumpserver_update_user')
+    const output = await update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'Bob Renamed', password: 'new-password-value' }, execution())
+    assert.match(output, /User updated/)
+    assert.match(output, /username="bob"/)
+    assert.match(output, /password_changed=true/)
+    assert.doesNotMatch(output, /new-password-value/)
+
+    const patchCall = calls.find((c) => c.init.method === 'PATCH')
+    assert.deepEqual(JSON.parse(patchCall.init.body), { name: 'Bob Renamed' })
+    const putCall = calls.find((c) => c.init.method === 'PUT')
+    assert.deepEqual(JSON.parse(putCall.init.body), { password: 'new-password-value' })
+
+    await assert.rejects(update.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution()), /Provide at least one field/)
+    await assert.rejects(update.execute({ id: 'not-a-uuid', name: 'x' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_update_user fails clearly when the user does not exist, without attempting the PATCH', async () => {
+  const originalFetch = globalThis.fetch
+  let patchCount = 0
+  globalThis.fetch = async (_url, init = {}) => {
+    if ((init.method ?? 'GET') === 'PATCH') { patchCount += 1; return jsonResponse({}, 200) }
+    return jsonResponse({ detail: 'Not found.' }, 404)
+  }
+  try {
+    const { tools } = createContext()
+    const update = toolByName(tools, 'jumpserver_update_user')
+    await assert.rejects(
+      update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'x' }, execution()),
+      /404/,
+    )
+    assert.equal(patchCount, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_reset_user_mfa refuses to act on a superuser and checks existence first', async () => {
+  const originalFetch = globalThis.fetch
+  let resetCount = 0
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('/mfa/reset/')) { resetCount += 1; return jsonResponse({ msg: 'ok' }) }
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', username: 'admin', is_superuser: true })
+  }
+  try {
+    const { tools } = createContext()
+    const reset = toolByName(tools, 'jumpserver_reset_user_mfa')
+    await assert.rejects(
+      reset.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution()),
+      /Refusing to reset MFA.*superuser/,
+    )
+    assert.equal(resetCount, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_reset_user_mfa resets MFA for a non-superuser and reports the username', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    if (String(url).includes('/mfa/reset/')) return jsonResponse({ msg: 'ok' })
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', username: 'bob', is_superuser: false })
+  }
+  try {
+    const { tools } = createContext()
+    const reset = toolByName(tools, 'jumpserver_reset_user_mfa')
+    const output = await reset.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(output, /MFA reset/)
+    assert.match(output, /username="bob"/)
+    assert.equal(calls.length, 2)
+    assert.match(new URL(calls[1]).pathname, /\/mfa\/reset\/$/)
+
+    await assert.rejects(reset.execute({ id: 'not-a-uuid' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_reset_user_ssh_key refuses to act on a superuser and checks existence first', async () => {
   const originalFetch = globalThis.fetch
   let putCount = 0
   globalThis.fetch = async (_url, init = {}) => {
@@ -842,10 +964,10 @@ test('jumpserver_reset_user_password refuses to act on a superuser and never ech
   }
   try {
     const { tools } = createContext()
-    const reset = toolByName(tools, 'jumpserver_reset_user_password')
+    const reset = toolByName(tools, 'jumpserver_reset_user_ssh_key')
     await assert.rejects(
-      reset.execute({ id: '123e4567-e89b-12d3-a456-426614174000', password: 'new-password-value' }, execution()),
-      /Refusing to reset.*superuser/,
+      reset.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution()),
+      /Refusing to reset the SSH key.*superuser/,
     )
     assert.equal(putCount, 0)
   } finally {
@@ -853,28 +975,25 @@ test('jumpserver_reset_user_password refuses to act on a superuser and never ech
   }
 })
 
-test('jumpserver_reset_user_password resets a non-superuser password and never echoes it back', async () => {
+test('jumpserver_reset_user_ssh_key resets the key for a non-superuser and reports the username', async () => {
   const originalFetch = globalThis.fetch
   const calls = []
   globalThis.fetch = async (url, init = {}) => {
     calls.push({ url: String(url), init })
-    if ((init.method ?? 'GET') === 'PUT') return jsonResponse({ password: 'new-password-value' }, 200)
+    if ((init.method ?? 'GET') === 'PUT') return jsonResponse({}, 200)
     return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', username: 'bob', is_superuser: false })
   }
   try {
     const { tools } = createContext()
-    const reset = toolByName(tools, 'jumpserver_reset_user_password')
-    const output = await reset.execute({ id: '123e4567-e89b-12d3-a456-426614174000', password: 'new-password-value' }, execution())
-    assert.match(output, /Password reset/)
+    const reset = toolByName(tools, 'jumpserver_reset_user_ssh_key')
+    const output = await reset.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(output, /SSH key reset/)
     assert.match(output, /username="bob"/)
-    assert.doesNotMatch(output, /new-password-value/)
-
     assert.equal(calls.length, 2)
     assert.equal(calls[1].init.method, 'PUT')
-    const body = JSON.parse(calls[1].init.body)
-    assert.deepEqual(body, { password: 'new-password-value' })
+    assert.deepEqual(JSON.parse(calls[1].init.body), {})
 
-    await assert.rejects(reset.execute({ id: 'not-a-uuid', password: 'x' }, execution()), /valid JumpServer UUID/)
+    await assert.rejects(reset.execute({ id: 'not-a-uuid' }, execution()), /valid JumpServer UUID/)
   } finally {
     globalThis.fetch = originalFetch
   }
@@ -995,13 +1114,26 @@ test('jumpserver_delete_permission checks existence first and reports the rule n
   }
 })
 
-test('approvalReasonForWrite never includes the literal password for user password resets', () => {
-  const reason = internals.approvalReasonForWrite({
-    name: 'jumpserver_reset_user_password',
-    arguments: { id: 'u1', password: 'super-secret-password' },
+test('approvalReasonForWrite never includes the literal password for user updates, and describes MFA/SSH key resets', () => {
+  const updateReason = internals.approvalReasonForWrite({
+    name: 'jumpserver_update_user',
+    arguments: { id: 'u1', name: 'Bob', password: 'super-secret-password' },
   })
-  assert.match(reason, /Reset the login password for JumpServer user id=u1/)
-  assert.doesNotMatch(reason, /super-secret-password/)
+  assert.match(updateReason, /Update JumpServer user id=u1/)
+  assert.match(updateReason, /Also resets the login password/)
+  assert.doesNotMatch(updateReason, /super-secret-password/)
+
+  const updateReasonNoPassword = internals.approvalReasonForWrite({
+    name: 'jumpserver_update_user',
+    arguments: { id: 'u1', isActive: false },
+  })
+  assert.doesNotMatch(updateReasonNoPassword, /resets the login password/)
+
+  const mfaReason = internals.approvalReasonForWrite({ name: 'jumpserver_reset_user_mfa', arguments: { id: 'u1' } })
+  assert.match(mfaReason, /Reset MFA\/OTP binding for JumpServer user id=u1/)
+
+  const sshReason = internals.approvalReasonForWrite({ name: 'jumpserver_reset_user_ssh_key', arguments: { id: 'u1' } })
+  assert.match(sshReason, /Reset the JumpServer login SSH public key for user id=u1/)
 })
 
 test('approvalReasonForWrite summarizes permission grants by counts, and flags deletes as irreversible', () => {
@@ -1026,7 +1158,9 @@ test('the tools/pre-execute gate also forces user and permission write tools to 
   const names = [
     'jumpserver_create_user',
     'jumpserver_delete_user',
-    'jumpserver_reset_user_password',
+    'jumpserver_update_user',
+    'jumpserver_reset_user_mfa',
+    'jumpserver_reset_user_ssh_key',
     'jumpserver_create_permission',
     'jumpserver_update_permission',
     'jumpserver_delete_permission',

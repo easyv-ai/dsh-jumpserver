@@ -123,6 +123,9 @@ test('apply registers all tools (read-only + write) and a system prompt section'
     'jumpserver_create_asset',
     'jumpserver_update_asset',
     'jumpserver_delete_asset',
+    'jumpserver_create_account',
+    'jumpserver_update_account',
+    'jumpserver_delete_account',
   ])
   assert.equal(sections.length, 1)
   assert.equal(sections[0].name, 'tool:jumpserver')
@@ -371,10 +374,13 @@ test('jumpserver_list_sessions filters by user/asset/isFinished and formats rows
   }
 })
 
-test('WRITE_TOOL_NAMES lists exactly the three asset write tools', () => {
+test('WRITE_TOOL_NAMES lists exactly the six asset and account write tools', () => {
   assert.deepEqual([...internals.WRITE_TOOL_NAMES].sort(), [
+    'jumpserver_create_account',
     'jumpserver_create_asset',
+    'jumpserver_delete_account',
     'jumpserver_delete_asset',
+    'jumpserver_update_account',
     'jumpserver_update_asset',
   ])
 })
@@ -392,6 +398,33 @@ test('approvalReasonForWrite describes create/update/delete from arguments only 
     internals.approvalReasonForWrite({ name: 'jumpserver_delete_asset', arguments: { id: 'abc-123' } }),
     /PERMANENTLY DELETE JumpServer asset id=abc-123.*cannot be undone/,
   )
+})
+
+test('approvalReasonForWrite never includes the literal secret/passphrase value for account writes', () => {
+  const createReason = internals.approvalReasonForWrite({
+    name: 'jumpserver_create_account',
+    arguments: { username: 'root', asset: 'asset-1', secret: 'super-secret-value' },
+  })
+  assert.match(createReason, /username="root"/)
+  assert.match(createReason, /Includes a secret\/password value/)
+  assert.doesNotMatch(createReason, /super-secret-value/)
+
+  const createReasonNoSecret = internals.approvalReasonForWrite({
+    name: 'jumpserver_create_account',
+    arguments: { username: 'root', asset: 'asset-1' },
+  })
+  assert.match(createReasonNoSecret, /No secret\/password provided/)
+
+  const updateReason = internals.approvalReasonForWrite({
+    name: 'jumpserver_update_account',
+    arguments: { id: 'acc-1', secret: 'rotated-secret-value', passphrase: 'also-secret' },
+  })
+  assert.match(updateReason, /Also changes the secret\/password value/)
+  assert.doesNotMatch(updateReason, /rotated-secret-value/)
+  assert.doesNotMatch(updateReason, /also-secret/)
+
+  const deleteReason = internals.approvalReasonForWrite({ name: 'jumpserver_delete_account', arguments: { id: 'acc-1' } })
+  assert.match(deleteReason, /PERMANENTLY DELETE JumpServer account id=acc-1/)
 })
 
 test('the tools/pre-execute gate forces every write tool to "ask" and leaves read-only tools untouched', async () => {
@@ -540,6 +573,151 @@ test('jumpserver_delete_asset fails clearly when the asset does not exist, witho
     assert.equal(deleteCount, 0)
   } finally {
     globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_create_account requires username/asset, accepts a secret, and never echoes it back', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    return jsonResponse({ id: 'acc-1', name: 'root', username: 'root', asset: '123e4567-e89b-12d3-a456-426614174000', secret_type: 'password', privileged: true, is_active: true }, 201)
+  }
+  try {
+    const { tools } = createContext()
+    const create = toolByName(tools, 'jumpserver_create_account')
+    const output = await create.execute({
+      username: 'root',
+      asset: '123e4567-e89b-12d3-a456-426614174000',
+      secret: 'super-secret-value',
+      passphrase: 'passphrase-value',
+      privileged: true,
+    }, execution())
+    assert.match(output, /Account created/)
+    assert.match(output, /username="root"/)
+    assert.doesNotMatch(output, /super-secret-value/)
+    assert.doesNotMatch(output, /passphrase-value/)
+
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].init.method, 'POST')
+    const body = JSON.parse(calls[0].init.body)
+    assert.deepEqual(body, {
+      username: 'root',
+      asset: '123e4567-e89b-12d3-a456-426614174000',
+      secret: 'super-secret-value',
+      passphrase: 'passphrase-value',
+      privileged: true,
+    })
+
+    await assert.rejects(create.execute({ asset: '123e4567-e89b-12d3-a456-426614174000' }, execution()), /missing required property "username"/)
+    await assert.rejects(create.execute({ username: 'root' }, execution()), /missing required property "asset"/)
+    await assert.rejects(create.execute({ username: 'root', asset: 'not-a-uuid' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_update_account checks existence first, PATCHes only provided fields, and never echoes a secret back', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    if ((init.method ?? 'GET') === 'GET') {
+      return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', username: 'root', asset: 'asset-1', secret_type: 'password', is_active: true })
+    }
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'root', username: 'root', asset: 'asset-1', secret_type: 'password', privileged: true, is_active: true, comment: 'rotated' })
+  }
+  try {
+    const { tools } = createContext()
+    const update = toolByName(tools, 'jumpserver_update_account')
+    const output = await update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', secret: 'new-secret-value', comment: 'rotated' }, execution())
+    assert.match(output, /Account updated/)
+    assert.doesNotMatch(output, /new-secret-value/)
+
+    assert.equal(calls.length, 2)
+    assert.equal(calls[0].init.method ?? 'GET', 'GET')
+    assert.equal(calls[1].init.method, 'PATCH')
+    const body = JSON.parse(calls[1].init.body)
+    assert.deepEqual(body, { secret: 'new-secret-value', comment: 'rotated' })
+
+    await assert.rejects(update.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution()), /Provide at least one field/)
+    await assert.rejects(update.execute({ id: 'not-a-uuid', comment: 'x' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_update_account fails clearly when the account does not exist, without attempting the PATCH', async () => {
+  const originalFetch = globalThis.fetch
+  let patchCount = 0
+  globalThis.fetch = async (_url, init = {}) => {
+    if ((init.method ?? 'GET') === 'PATCH') { patchCount += 1; return jsonResponse({}, 200) }
+    return jsonResponse({ detail: 'Not found.' }, 404)
+  }
+  try {
+    const { tools } = createContext()
+    const update = toolByName(tools, 'jumpserver_update_account')
+    await assert.rejects(
+      update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', comment: 'x' }, execution()),
+      /404/,
+    )
+    assert.equal(patchCount, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_delete_account checks existence first, reports username/asset, and rejects malformed ids', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    if ((init.method ?? 'GET') === 'DELETE') return new Response(null, { status: 204 })
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', username: 'root', asset: 'asset-1' })
+  }
+  try {
+    const { tools } = createContext()
+    const del = toolByName(tools, 'jumpserver_delete_account')
+    const output = await del.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(output, /Account deleted/)
+    assert.match(output, /username="root"/)
+    assert.match(output, /asset="asset-1"/)
+    assert.equal(calls.length, 2)
+    assert.equal(calls[0].init.method ?? 'GET', 'GET')
+    assert.equal(calls[1].init.method, 'DELETE')
+
+    await assert.rejects(del.execute({ id: 'not-a-uuid' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_delete_account fails clearly when the account does not exist, without attempting the DELETE', async () => {
+  const originalFetch = globalThis.fetch
+  let deleteCount = 0
+  globalThis.fetch = async (_url, init = {}) => {
+    if ((init.method ?? 'GET') === 'DELETE') { deleteCount += 1; return new Response(null, { status: 204 }) }
+    return jsonResponse({ detail: 'Not found.' }, 404)
+  }
+  try {
+    const { tools } = createContext()
+    const del = toolByName(tools, 'jumpserver_delete_account')
+    await assert.rejects(
+      del.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution()),
+      /404/,
+    )
+    assert.equal(deleteCount, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('the tools/pre-execute gate also forces account write tools to "ask"', async () => {
+  const { listeners } = createContext()
+  const gate = listeners.get('tools/pre-execute')
+  for (const name of ['jumpserver_create_account', 'jumpserver_update_account', 'jumpserver_delete_account']) {
+    const decision = await gate({ name, arguments: { id: 'x', username: 'x', asset: 'x' } }, async () => ({ kind: 'allow' }))
+    assert.equal(decision.kind, 'ask', `${name} should require approval`)
   }
 })
 

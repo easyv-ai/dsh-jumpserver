@@ -4,12 +4,13 @@
 
 一个 DeepSeek Harness 插件，通过对话查询并管理 JumpServer 资产，使用 JumpServer 的 AccessKeyID/AccessKeySecret（HTTP Signature）进行鉴权。
 
-> 项目状态：v0.4.0。已实现资产、用户、账号、授权规则、会话的只读查询，以及资产和账号的创建/更新/删除（均需经过强制的原生用户审批）。用户和授权规则相关的写操作（重置密码、授权变更、终止会话、工单审批），考虑到 JumpServer 作为堡垒机/PAM 系统的角色，目前有意保留不实现。
+> 项目状态：v0.5.0。已实现资产、用户、账号、授权规则、会话的只读查询，以及资产、账号、用户、资产授权规则的创建/更新/删除，以及密码重置——均需经过强制的原生用户审批。考虑到 JumpServer 作为堡垒机/PAM 系统的角色，终止会话和工单审批目前有意保留不实现。
 
 ## 为什么用 dsh-jumpserver
 
 - 按关键字或过滤条件查询 JumpServer 的资产、用户、账号、资产授权规则和终端会话。
-- 创建、更新、删除资产和账号——每次写操作执行前都必须经过明确的原生用户审批提示，模型无法绕过。
+- 创建、更新、删除资产、账号、用户、资产授权规则，以及重置用户密码——每次写操作执行前都必须经过明确的原生用户审批提示，模型无法绕过。
+- 拒绝删除或重置超级管理员（管理员）账号的密码，也拒绝创建"授予所有权限"式的宽泛资产授权规则——这两点都由工具自身强制执行，不只是写在文档里的约定。
 - 只读查询绝不泄露敏感信息：账号的密钥/密钥密码，以及用户的密码/公钥/MFA 密钥，在返回给模型前会被逐字段剔除，即便 JumpServer API 本身返回了这些字段。
 - 使用 JumpServer 官方开发文档中记录的 AccessKeyID/AccessKeySecret 签名机制（`hmac-sha256` HTTP Signature）进行鉴权。
 - AccessKeySecret 保存在本地 DSH 凭证库中，永远不会被回显到浏览器。
@@ -89,8 +90,18 @@ allowInsecureHttp: false
 | `jumpserver_create_account` | **写操作。** 创建账号（必填 `username`、`asset`；可选 `name`、`secretType`、`secret`、`passphrase`、`privileged`、`isActive`、`comment`）。需要原生用户审批，详见下方"账号密钥的处理方式"。 |
 | `jumpserver_update_account` | **写操作。** 按 `id` 更新已有账号；只会修改你传入的字段，可用于轮换 `secret`/`passphrase`。需要原生用户审批。 |
 | `jumpserver_delete_account` | **写操作，不可逆。** 按 `id` 永久删除账号。需要原生用户审批。 |
+| `jumpserver_create_user` | **写操作。** 创建平台用户（必填 `name`、`username`、`email`；可选 `comment`、`isActive`）。不会设置密码——用 `jumpserver_reset_user_password` 单独设置。需要原生用户审批。 |
+| `jumpserver_delete_user` | **写操作，不可逆。** 按 `id` 永久删除用户。拒绝删除超级管理员（管理员）账号。需要原生用户审批。 |
+| `jumpserver_reset_user_password` | **写操作。** 将用户的登录密码重置为指定值（必填 `id`、`password`）。拒绝对超级管理员账号执行。需要原生用户审批，见下方"账号密钥的处理方式"——同样的暴露权衡适用于这个密码值。 |
+| `jumpserver_create_permission` | **写操作。** 创建资产授权规则（必填 `name`；`assets`、`accounts` 必须是非空 UUID 数组；`users`/`userGroups` 至少提供一个且非空）。拒绝宽泛或"授予所有权限"式的匹配——不提供 `all` 或按节点匹配的选项。需要原生用户审批。 |
+| `jumpserver_update_permission` | **写操作。** 按 `id` 更新已有规则；只会修改你传入的字段。传入的任何数组字段（`users`、`userGroups`、`assets`、`accounts`）都必须非空。需要原生用户审批。 |
+| `jumpserver_delete_permission` | **写操作，不可逆。** 按 `id` 永久删除资产授权规则，立即撤销其授予的访问权限。需要原生用户审批。 |
 
-用户和资产授权规则相关的写操作（创建/删除用户、重置密码、授权变更、终止会话、工单审批）尚未实现。考虑到 JumpServer 作为堡垒机/PAM 系统的角色，这些操作直接影响谁能登录、谁能访问什么资产——影响范围明显高于资产/账号记录本身——因此有意延后，留待单独决策。
+终止会话和工单审批尚未实现，目前也没有计划实现——详见下方"范围之外"。
+
+### 范围之外
+
+`jumpserver_terminate_session` 曾被评估过，最终放弃：JumpServer 的 `/api/v1/terminal/tasks/kill-session/` 接口在标准 swagger 导出中没有记录请求体 schema，实际字段名只能推断、无法确认。工单审批（`/api/v1/tickets/...`）有意不实现——这会让助手替代本应由人工完成的审批步骤，而这正是 JumpServer 自身工作流所要求的。
 
 ### 写操作审批机制
 
@@ -101,6 +112,8 @@ allowInsecureHttp: false
 `jumpserver_create_account` 和 `jumpserver_update_account` 接受可选的 `secret`/`passphrase` 参数——也就是目标资产上实际的登录凭据。这是本插件"密钥绝不进入模型上下文"这一惯例的一个刻意例外：与 AccessKeySecret（只存在于 DSH 凭证库中，永远不会发给模型）不同，通过这两个工具设置的账号密钥，会经过工具调用参数才能到达 JumpServer，因此会暴露在对话内容中，以及处理该对话的模型服务商那一侧。
 
 审批提示中永远不会显示密钥的具体值——只会提示"是否正在设置或修改密钥"这一事实——工具的返回值同样不会回显具体值。但这种脱敏止步于插件边界：如果你让助手设置一个具体的密码，那个密码在到达插件之前，都会出现在对话记录里。如果密钥值本身必须完全不经过模型上下文，建议优先使用 JumpServer 自身的自动化能力（账号推送、改密任务）来生成/轮换凭据；只有在你已明确接受这一权衡的情况下，才使用这两个工具的密钥参数。
+
+同样的权衡也适用于 `jumpserver_reset_user_password` 的 `password` 参数。
 
 ## 安全与数据边界
 

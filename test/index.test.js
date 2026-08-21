@@ -126,6 +126,12 @@ test('apply registers all tools (read-only + write) and a system prompt section'
     'jumpserver_create_account',
     'jumpserver_update_account',
     'jumpserver_delete_account',
+    'jumpserver_create_user',
+    'jumpserver_delete_user',
+    'jumpserver_reset_user_password',
+    'jumpserver_create_permission',
+    'jumpserver_update_permission',
+    'jumpserver_delete_permission',
   ])
   assert.equal(sections.length, 1)
   assert.equal(sections[0].name, 'tool:jumpserver')
@@ -374,14 +380,20 @@ test('jumpserver_list_sessions filters by user/asset/isFinished and formats rows
   }
 })
 
-test('WRITE_TOOL_NAMES lists exactly the six asset and account write tools', () => {
+test('WRITE_TOOL_NAMES lists exactly the twelve write tools', () => {
   assert.deepEqual([...internals.WRITE_TOOL_NAMES].sort(), [
     'jumpserver_create_account',
     'jumpserver_create_asset',
+    'jumpserver_create_permission',
+    'jumpserver_create_user',
     'jumpserver_delete_account',
     'jumpserver_delete_asset',
+    'jumpserver_delete_permission',
+    'jumpserver_delete_user',
+    'jumpserver_reset_user_password',
     'jumpserver_update_account',
     'jumpserver_update_asset',
+    'jumpserver_update_permission',
   ])
 })
 
@@ -717,6 +729,301 @@ test('the tools/pre-execute gate also forces account write tools to "ask"', asyn
   const gate = listeners.get('tools/pre-execute')
   for (const name of ['jumpserver_create_account', 'jumpserver_update_account', 'jumpserver_delete_account']) {
     const decision = await gate({ name, arguments: { id: 'x', username: 'x', asset: 'x' } }, async () => ({ kind: 'allow' }))
+    assert.equal(decision.kind, 'ask', `${name} should require approval`)
+  }
+})
+
+test('isSuperuser recognizes boolean true and the string forms JumpServer may return', () => {
+  assert.equal(internals.isSuperuser({ is_superuser: true }), true)
+  assert.equal(internals.isSuperuser({ is_superuser: 'true' }), true)
+  assert.equal(internals.isSuperuser({ is_superuser: 'True' }), true)
+  assert.equal(internals.isSuperuser({ is_superuser: false }), false)
+  assert.equal(internals.isSuperuser({ is_superuser: 'false' }), false)
+  assert.equal(internals.isSuperuser({}), false)
+})
+
+test('requireNonEmptyIdArray rejects empty arrays, non-arrays, and malformed UUIDs (anti-broad-grant guard)', () => {
+  assert.deepEqual(
+    internals.requireNonEmptyIdArray(['123e4567-e89b-12d3-a456-426614174000'], 'assets'),
+    ['123e4567-e89b-12d3-a456-426614174000'],
+  )
+  assert.throws(() => internals.requireNonEmptyIdArray([], 'assets'), /non-empty array/)
+  assert.throws(() => internals.requireNonEmptyIdArray(undefined, 'assets'), /non-empty array/)
+  assert.throws(() => internals.requireNonEmptyIdArray('all', 'assets'), /non-empty array/)
+  assert.throws(() => internals.requireNonEmptyIdArray(['not-a-uuid'], 'assets'), /valid JumpServer UUID/)
+})
+
+test('jumpserver_create_user requires name/username/email and never accepts a password', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    return jsonResponse({ id: 'u1', username: 'bob', name: 'Bob', email: 'bob@example.com', is_active: true }, 201)
+  }
+  try {
+    const { tools } = createContext()
+    const create = toolByName(tools, 'jumpserver_create_user')
+    const output = await create.execute({ name: 'Bob', username: 'bob', email: 'bob@example.com' }, execution())
+    assert.match(output, /User created/)
+    assert.match(output, /username="bob"/)
+
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].init.method, 'POST')
+    const body = JSON.parse(calls[0].init.body)
+    assert.deepEqual(body, { name: 'Bob', username: 'bob', email: 'bob@example.com' })
+    assert.equal('password' in body, false)
+
+    await assert.rejects(create.execute({ username: 'bob', email: 'bob@example.com' }, execution()), /missing required property "name"/)
+    await assert.rejects(create.execute({ name: 'Bob', email: 'bob@example.com' }, execution()), /missing required property "username"/)
+    await assert.rejects(create.execute({ name: 'Bob', username: 'bob' }, execution()), /missing required property "email"/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_delete_user refuses to delete a superuser and checks existence first', async () => {
+  const originalFetch = globalThis.fetch
+  let deleteCount = 0
+  globalThis.fetch = async (_url, init = {}) => {
+    if ((init.method ?? 'GET') === 'DELETE') { deleteCount += 1; return new Response(null, { status: 204 }) }
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', username: 'admin', name: 'Admin', is_superuser: true })
+  }
+  try {
+    const { tools } = createContext()
+    const del = toolByName(tools, 'jumpserver_delete_user')
+    await assert.rejects(
+      del.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution()),
+      /Refusing to delete.*superuser/,
+    )
+    assert.equal(deleteCount, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_delete_user deletes a non-superuser and reports username/name', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    if ((init.method ?? 'GET') === 'DELETE') return new Response(null, { status: 204 })
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', username: 'bob', name: 'Bob', is_superuser: false })
+  }
+  try {
+    const { tools } = createContext()
+    const del = toolByName(tools, 'jumpserver_delete_user')
+    const output = await del.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(output, /User deleted/)
+    assert.match(output, /username="bob"/)
+    assert.equal(calls.length, 2)
+    assert.equal(calls[1].init.method, 'DELETE')
+
+    await assert.rejects(del.execute({ id: 'not-a-uuid' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_reset_user_password refuses to act on a superuser and never echoes the password', async () => {
+  const originalFetch = globalThis.fetch
+  let putCount = 0
+  globalThis.fetch = async (_url, init = {}) => {
+    if ((init.method ?? 'GET') === 'PUT') { putCount += 1; return jsonResponse({}, 200) }
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', username: 'admin', is_superuser: true })
+  }
+  try {
+    const { tools } = createContext()
+    const reset = toolByName(tools, 'jumpserver_reset_user_password')
+    await assert.rejects(
+      reset.execute({ id: '123e4567-e89b-12d3-a456-426614174000', password: 'new-password-value' }, execution()),
+      /Refusing to reset.*superuser/,
+    )
+    assert.equal(putCount, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_reset_user_password resets a non-superuser password and never echoes it back', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    if ((init.method ?? 'GET') === 'PUT') return jsonResponse({ password: 'new-password-value' }, 200)
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', username: 'bob', is_superuser: false })
+  }
+  try {
+    const { tools } = createContext()
+    const reset = toolByName(tools, 'jumpserver_reset_user_password')
+    const output = await reset.execute({ id: '123e4567-e89b-12d3-a456-426614174000', password: 'new-password-value' }, execution())
+    assert.match(output, /Password reset/)
+    assert.match(output, /username="bob"/)
+    assert.doesNotMatch(output, /new-password-value/)
+
+    assert.equal(calls.length, 2)
+    assert.equal(calls[1].init.method, 'PUT')
+    const body = JSON.parse(calls[1].init.body)
+    assert.deepEqual(body, { password: 'new-password-value' })
+
+    await assert.rejects(reset.execute({ id: 'not-a-uuid', password: 'x' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_create_permission requires non-empty users/assets/accounts and rejects broad grants', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    return jsonResponse({ id: 'p1', name: 'dev-access', users: ['u1'], user_groups: [], assets: ['a1'], accounts: ['acc1'], is_active: true }, 201)
+  }
+  try {
+    const { tools } = createContext()
+    const create = toolByName(tools, 'jumpserver_create_permission')
+    const output = await create.execute({
+      name: 'dev-access',
+      users: ['123e4567-e89b-12d3-a456-426614174000'],
+      assets: ['223e4567-e89b-12d3-a456-426614174000'],
+      accounts: ['323e4567-e89b-12d3-a456-426614174000'],
+    }, execution())
+    assert.match(output, /Permission rule created/)
+    assert.match(output, /name="dev-access"/)
+
+    const body = JSON.parse(calls[0].init.body)
+    assert.deepEqual(body, {
+      name: 'dev-access',
+      users: ['123e4567-e89b-12d3-a456-426614174000'],
+      assets: ['223e4567-e89b-12d3-a456-426614174000'],
+      accounts: ['323e4567-e89b-12d3-a456-426614174000'],
+    })
+
+    // 缺少 users/userGroups：拒绝。
+    await assert.rejects(create.execute({
+      name: 'no-grantee', assets: ['223e4567-e89b-12d3-a456-426614174000'], accounts: ['323e4567-e89b-12d3-a456-426614174000'],
+    }, execution()), /Provide at least one of users or userGroups/)
+
+    // assets 缺失（框架必填校验）。
+    await assert.rejects(create.execute({
+      name: 'no-assets', users: ['123e4567-e89b-12d3-a456-426614174000'], accounts: ['323e4567-e89b-12d3-a456-426614174000'],
+    }, execution()), /missing required property "assets"/)
+
+    // accounts 传空数组：视为宽泛授权，拒绝。
+    await assert.rejects(create.execute({
+      name: 'broad-accounts', users: ['123e4567-e89b-12d3-a456-426614174000'], assets: ['223e4567-e89b-12d3-a456-426614174000'], accounts: [],
+    }, execution()), /non-empty array/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_update_permission checks existence first and rejects clearing arrays to empty', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    if ((init.method ?? 'GET') === 'GET') return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'dev-access' })
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'dev-access-renamed', users: ['u1'], user_groups: [], assets: ['a1'], accounts: ['acc1'], is_active: true })
+  }
+  try {
+    const { tools } = createContext()
+    const update = toolByName(tools, 'jumpserver_update_permission')
+    const output = await update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'dev-access-renamed' }, execution())
+    assert.match(output, /Permission rule updated/)
+    assert.equal(calls.length, 2)
+    assert.equal(calls[0].init.method ?? 'GET', 'GET')
+    assert.equal(calls[1].init.method, 'PATCH')
+    const body = JSON.parse(calls[1].init.body)
+    assert.deepEqual(body, { name: 'dev-access-renamed' })
+
+    await assert.rejects(update.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution()), /Provide at least one field/)
+    await assert.rejects(update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', assets: [] }, execution()), /non-empty array/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_update_permission fails clearly when the rule does not exist, without attempting the PATCH', async () => {
+  const originalFetch = globalThis.fetch
+  let patchCount = 0
+  globalThis.fetch = async (_url, init = {}) => {
+    if ((init.method ?? 'GET') === 'PATCH') { patchCount += 1; return jsonResponse({}, 200) }
+    return jsonResponse({ detail: 'Not found.' }, 404)
+  }
+  try {
+    const { tools } = createContext()
+    const update = toolByName(tools, 'jumpserver_update_permission')
+    await assert.rejects(
+      update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'x' }, execution()),
+      /404/,
+    )
+    assert.equal(patchCount, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_delete_permission checks existence first and reports the rule name', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    if ((init.method ?? 'GET') === 'DELETE') return new Response(null, { status: 204 })
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'dev-access' })
+  }
+  try {
+    const { tools } = createContext()
+    const del = toolByName(tools, 'jumpserver_delete_permission')
+    const output = await del.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(output, /Permission rule deleted/)
+    assert.match(output, /name="dev-access"/)
+    assert.equal(calls.length, 2)
+    assert.equal(calls[1].init.method, 'DELETE')
+
+    await assert.rejects(del.execute({ id: 'not-a-uuid' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('approvalReasonForWrite never includes the literal password for user password resets', () => {
+  const reason = internals.approvalReasonForWrite({
+    name: 'jumpserver_reset_user_password',
+    arguments: { id: 'u1', password: 'super-secret-password' },
+  })
+  assert.match(reason, /Reset the login password for JumpServer user id=u1/)
+  assert.doesNotMatch(reason, /super-secret-password/)
+})
+
+test('approvalReasonForWrite summarizes permission grants by counts, and flags deletes as irreversible', () => {
+  const createReason = internals.approvalReasonForWrite({
+    name: 'jumpserver_create_permission',
+    arguments: { name: 'dev-access', users: ['u1'], userGroups: [], assets: ['a1', 'a2'], accounts: ['acc1'] },
+  })
+  assert.match(createReason, /name="dev-access"/)
+  assert.match(createReason, /Grants 1 user\(s\) and 0 user group\(s\) access to 2 asset\(s\) via 1 account\(s\)/)
+
+  const deleteReason = internals.approvalReasonForWrite({ name: 'jumpserver_delete_permission', arguments: { id: 'p1' } })
+  assert.match(deleteReason, /PERMANENTLY DELETE JumpServer asset-permission rule id=p1/)
+  assert.match(deleteReason, /cannot be undone/)
+
+  const deleteUserReason = internals.approvalReasonForWrite({ name: 'jumpserver_delete_user', arguments: { id: 'u1' } })
+  assert.match(deleteUserReason, /PERMANENTLY DELETE JumpServer user id=u1/)
+})
+
+test('the tools/pre-execute gate also forces user and permission write tools to "ask"', async () => {
+  const { listeners } = createContext()
+  const gate = listeners.get('tools/pre-execute')
+  const names = [
+    'jumpserver_create_user',
+    'jumpserver_delete_user',
+    'jumpserver_reset_user_password',
+    'jumpserver_create_permission',
+    'jumpserver_update_permission',
+    'jumpserver_delete_permission',
+  ]
+  for (const name of names) {
+    const decision = await gate({ name, arguments: { id: 'x' } }, async () => ({ kind: 'allow' }))
     assert.equal(decision.kind, 'ask', `${name} should require approval`)
   }
 })

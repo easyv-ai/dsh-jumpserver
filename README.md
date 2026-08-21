@@ -4,12 +4,13 @@
 
 A DeepSeek Harness plugin for querying and managing JumpServer assets through conversation, authenticated with a JumpServer AccessKeyID/AccessKeySecret pair (HTTP Signature).
 
-> Project status: v0.4.0. Read-only asset, user, account, permission, and session lookups are implemented, plus create/update/delete for assets and accounts behind a mandatory native user-approval prompt. User and permission write operations (password reset, permission grants, session termination, ticket approval) remain intentionally out of scope for now given JumpServer's role as a bastion/PAM system.
+> Project status: v0.5.0. Read-only asset, user, account, permission, and session lookups are implemented, plus create/update/delete for assets, accounts, users, and asset-permission rules, and password resets — all behind a mandatory native user-approval prompt. Session termination and ticket approval remain intentionally out of scope given JumpServer's role as a bastion/PAM system.
 
 ## Why dsh-jumpserver
 
 - List and inspect JumpServer assets, users, accounts, asset-permission rules, and terminal sessions by keyword or filter.
-- Create, update, and delete assets and accounts — every write requires an explicit native user-approval prompt before it runs; the model cannot bypass it.
+- Create, update, and delete assets, accounts, users, and asset-permission rules, and reset user passwords — every write requires an explicit native user-approval prompt before it runs; the model cannot bypass it.
+- Refuses to delete or reset the password of superuser (administrator) accounts, and refuses to create asset-permission rules with broad or "grant access to everything" matching — both are enforced by the tools themselves, not just documented as a convention.
 - Never exposes secrets on read: account secrets/passphrases and user passwords/public keys/MFA secrets are stripped before a response reaches the model, even if the JumpServer API includes them.
 - Authenticate with a JumpServer AccessKeyID/AccessKeySecret pair using JumpServer's native HTTP Signature scheme (`hmac-sha256`), the same mechanism documented in JumpServer's own developer docs.
 - Keep the AccessKeySecret in the local DSH credential store; it is never echoed back to the browser.
@@ -89,8 +90,18 @@ Read-only tools paginate with `limit` (1-100, default 20) / `offset` (default 0)
 | `jumpserver_create_account` | **Write.** Creates an account (`username`, `asset` required; `name`, `secretType`, `secret`, `passphrase`, `privileged`, `isActive`, `comment` optional). Requires native user approval. See "Handling account secrets" below. |
 | `jumpserver_update_account` | **Write.** Updates an existing account by `id`; only the fields you pass are changed. Can rotate `secret`/`passphrase`. Requires native user approval. |
 | `jumpserver_delete_account` | **Write, irreversible.** Permanently deletes an account by `id`. Requires native user approval. |
+| `jumpserver_create_user` | **Write.** Creates a platform user (`name`, `username`, `email` required; `comment`, `isActive` optional). Never sets a password — use `jumpserver_reset_user_password` for that. Requires native user approval. |
+| `jumpserver_delete_user` | **Write, irreversible.** Permanently deletes a user by `id`. Refuses to delete superuser (administrator) accounts. Requires native user approval. |
+| `jumpserver_reset_user_password` | **Write.** Resets a user's login password to a specific value (`id`, `password` required). Refuses to act on superuser accounts. Requires native user approval. See "Handling account secrets" below — the same exposure tradeoff applies to this password value. |
+| `jumpserver_create_permission` | **Write.** Creates an asset-permission rule (`name` required; `assets`, `accounts` required as non-empty UUID arrays; at least one of `users`/`userGroups` required, also non-empty). Rejects broad or "grant access to everything" matching — there is no `all`/node-wide option. Requires native user approval. |
+| `jumpserver_update_permission` | **Write.** Updates an existing rule by `id`; only the fields you pass are changed. Any array field you do pass (`users`, `userGroups`, `assets`, `accounts`) must be non-empty. Requires native user approval. |
+| `jumpserver_delete_permission` | **Write, irreversible.** Permanently deletes an asset-permission rule by `id`, revoking the access it granted. Requires native user approval. |
 
-User and asset-permission write operations (create/delete users, password reset, permission grants, session termination, ticket approval) are not implemented. Given JumpServer's role as a bastion/PAM system, these affect who can log in and what they can access — a materially higher blast radius than asset/account records — and are deliberately deferred pending a separate decision.
+Session termination and ticket approval are not implemented, and are not currently planned — see "Out of scope" below.
+
+### Out of scope
+
+`jumpserver_terminate_session` was evaluated but dropped: JumpServer's `/api/v1/terminal/tasks/kill-session/` endpoint has no documented request-body schema in the standard swagger export, so the exact contract could only be inferred, not confirmed. Ticket approval (`/api/v1/tickets/...`) is intentionally not implemented — it would let the assistant substitute for a human approval step that JumpServer's own workflow requires.
 
 ### Write-tool approval
 
@@ -101,6 +112,8 @@ Every call to an asset or account write tool is intercepted by a `tools/pre-exec
 `jumpserver_create_account` and `jumpserver_update_account` accept an optional `secret`/`passphrase` value — the actual login credential for the target asset. This is a deliberate exception to this plugin's usual rule that secrets never enter the model's context: unlike the AccessKeySecret (which lives only in the DSH credential store and is never sent to the model), an account secret set through these tools passes through the tool-call arguments to reach JumpServer, and is therefore exposed to the conversation and whatever model provider processes it.
 
 The approval prompt never displays the literal secret value — it only states whether a secret/passphrase is being set or changed — and the tool's return value never echoes it back either. But the redaction stops at the plugin boundary: if you ask the assistant to set a specific password, that password will appear in the conversation transcript up to that point. Prefer letting JumpServer generate/rotate credentials through its own automation (account push, change-secret executions) when the value itself must stay out of the model's context; use these tools' secret parameter only when you've explicitly accepted that tradeoff.
+
+The same tradeoff applies to `jumpserver_reset_user_password`'s `password` parameter.
 
 ## Security and data boundaries
 

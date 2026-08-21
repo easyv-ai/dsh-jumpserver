@@ -4,12 +4,12 @@
 
 A DeepSeek Harness plugin for querying and managing JumpServer assets through conversation, authenticated with a JumpServer AccessKeyID/AccessKeySecret pair (HTTP Signature).
 
-> Project status: v0.5.0. Read-only asset, user, account, permission, and session lookups are implemented, plus create/update/delete for assets, accounts, users, and asset-permission rules, and password resets — all behind a mandatory native user-approval prompt. Session termination and ticket approval remain intentionally out of scope given JumpServer's role as a bastion/PAM system.
+> Project status: v0.6.0. Read-only asset, user, account, permission, session, command-audit, and user-group lookups are implemented, plus create/update/delete for assets, accounts, users, asset-permission rules, and user groups, and password resets — all behind a mandatory native user-approval prompt. Session termination and ticket approval remain intentionally out of scope given JumpServer's role as a bastion/PAM system.
 
 ## Why dsh-jumpserver
 
-- List and inspect JumpServer assets, users, accounts, asset-permission rules, and terminal sessions by keyword or filter.
-- Create, update, and delete assets, accounts, users, and asset-permission rules, and reset user passwords — every write requires an explicit native user-approval prompt before it runs; the model cannot bypass it.
+- List and inspect JumpServer assets, users, accounts, asset-permission rules, terminal sessions, executed commands, and user groups by keyword or filter.
+- Create, update, and delete assets, accounts, users, asset-permission rules, and user groups, and reset user passwords — every write requires an explicit native user-approval prompt before it runs; the model cannot bypass it.
 - Refuses to delete or reset the password of superuser (administrator) accounts, and refuses to create asset-permission rules with broad or "grant access to everything" matching — both are enforced by the tools themselves, not just documented as a convention.
 - Never exposes secrets on read: account secrets/passphrases and user passwords/public keys/MFA secrets are stripped before a response reaches the model, even if the JumpServer API includes them.
 - Authenticate with a JumpServer AccessKeyID/AccessKeySecret pair using JumpServer's native HTTP Signature scheme (`hmac-sha256`), the same mechanism documented in JumpServer's own developer docs.
@@ -96,6 +96,12 @@ Read-only tools paginate with `limit` (1-100, default 20) / `offset` (default 0)
 | `jumpserver_create_permission` | **Write.** Creates an asset-permission rule (`name` required; `assets`, `accounts` required as non-empty UUID arrays; at least one of `users`/`userGroups` required, also non-empty). Rejects broad or "grant access to everything" matching — there is no `all`/node-wide option. Requires native user approval. |
 | `jumpserver_update_permission` | **Write.** Updates an existing rule by `id`; only the fields you pass are changed. Any array field you do pass (`users`, `userGroups`, `assets`, `accounts`) must be non-empty. Requires native user approval. |
 | `jumpserver_delete_permission` | **Write, irreversible.** Permanently deletes an asset-permission rule by `id`, revoking the access it granted. Requires native user approval. |
+| `jumpserver_list_commands` | Lists executed session commands (command audit log), optionally filtered by `asset`, `account`, `user`, `sessionId`, or `riskLevel`. Command output is truncated to 500 characters per row. |
+| `jumpserver_list_user_groups` | Lists user groups with an optional `search` keyword. A group by itself grants no asset access. |
+| `jumpserver_get_user_group` | Gets full detail for one user group by `id`, including its member user ids. |
+| `jumpserver_create_user_group` | **Write.** Creates a user group (`name` required; `users`, `comment` optional). Requires native user approval. |
+| `jumpserver_update_user_group` | **Write.** Updates an existing group by `id`; only the fields you pass are changed. If you pass `users`, it must be non-empty. Requires native user approval. |
+| `jumpserver_delete_user_group` | **Write, irreversible.** Permanently deletes a user group by `id`; member users themselves are not deleted, but any permission rules referencing the group lose that grant. Requires native user approval. |
 
 Session termination and ticket approval are not implemented, and are not currently planned — see "Out of scope" below.
 

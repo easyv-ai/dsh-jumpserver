@@ -132,6 +132,12 @@ test('apply registers all tools (read-only + write) and a system prompt section'
     'jumpserver_create_permission',
     'jumpserver_update_permission',
     'jumpserver_delete_permission',
+    'jumpserver_list_commands',
+    'jumpserver_list_user_groups',
+    'jumpserver_get_user_group',
+    'jumpserver_create_user_group',
+    'jumpserver_update_user_group',
+    'jumpserver_delete_user_group',
   ])
   assert.equal(sections.length, 1)
   assert.equal(sections[0].name, 'tool:jumpserver')
@@ -380,20 +386,23 @@ test('jumpserver_list_sessions filters by user/asset/isFinished and formats rows
   }
 })
 
-test('WRITE_TOOL_NAMES lists exactly the twelve write tools', () => {
+test('WRITE_TOOL_NAMES lists exactly the fifteen write tools', () => {
   assert.deepEqual([...internals.WRITE_TOOL_NAMES].sort(), [
     'jumpserver_create_account',
     'jumpserver_create_asset',
     'jumpserver_create_permission',
     'jumpserver_create_user',
+    'jumpserver_create_user_group',
     'jumpserver_delete_account',
     'jumpserver_delete_asset',
     'jumpserver_delete_permission',
     'jumpserver_delete_user',
+    'jumpserver_delete_user_group',
     'jumpserver_reset_user_password',
     'jumpserver_update_account',
     'jumpserver_update_asset',
     'jumpserver_update_permission',
+    'jumpserver_update_user_group',
   ])
 })
 
@@ -1025,6 +1034,198 @@ test('the tools/pre-execute gate also forces user and permission write tools to 
   for (const name of names) {
     const decision = await gate({ name, arguments: { id: 'x' } }, async () => ({ kind: 'allow' }))
     assert.equal(decision.kind, 'ask', `${name} should require approval`)
+  }
+})
+
+test('riskLevelLabel maps known JumpServer risk level codes and falls back to the raw value', () => {
+  assert.equal(internals.riskLevelLabel(0), 'accepted')
+  assert.equal(internals.riskLevelLabel(5), 'rejected')
+  assert.equal(internals.riskLevelLabel(4), 'warning')
+  assert.equal(internals.riskLevelLabel(99), '99')
+  assert.equal(internals.riskLevelLabel(undefined), '')
+})
+
+test('truncateForDisplay bounds long command output and leaves short output untouched', () => {
+  assert.equal(internals.truncateForDisplay('short'), 'short')
+  const long = 'x'.repeat(600)
+  const truncated = internals.truncateForDisplay(long)
+  assert.ok(truncated.length < long.length)
+  assert.match(truncated, /\[truncated\]$/)
+  assert.equal(internals.truncateForDisplay('exact', 5), 'exact')
+})
+
+test('jumpserver_list_commands filters by asset/account/user/sessionId/riskLevel and truncates long output', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    return jsonResponse({
+      count: 1,
+      results: [{
+        id: 'c1', user: 'alice', asset: 'web-01', account: 'root',
+        input: 'x'.repeat(600), risk_level: 5, timestamp_display: '2026-08-21 10:00:00',
+      }],
+    })
+  }
+  try {
+    const { tools } = createContext()
+    const list = toolByName(tools, 'jumpserver_list_commands')
+    const output = await list.execute({
+      asset: 'web-01', account: 'root', user: 'alice',
+      sessionId: '123e4567-e89b-12d3-a456-426614174000', riskLevel: 5,
+    }, execution())
+    assert.match(output, /user="alice"/)
+    assert.match(output, /risk_level="rejected"/)
+    assert.match(output, /\[truncated\]/)
+
+    const requestUrl = new URL(calls[0])
+    assert.equal(requestUrl.pathname, '/api/v1/terminal/commands/')
+    assert.equal(requestUrl.searchParams.get('asset'), 'web-01')
+    assert.equal(requestUrl.searchParams.get('account'), 'root')
+    assert.equal(requestUrl.searchParams.get('user'), 'alice')
+    assert.equal(requestUrl.searchParams.get('session'), '123e4567-e89b-12d3-a456-426614174000')
+    assert.equal(requestUrl.searchParams.get('risk_level'), '5')
+
+    await assert.rejects(list.execute({ sessionId: 'not-a-uuid' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_list_user_groups and jumpserver_get_user_group format results and reject malformed ids', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    if (new URL(String(url)).pathname === '/api/v1/users/groups/') {
+      return jsonResponse({ count: 1, results: [{ id: 'g1', name: 'devops', users: ['u1', 'u2'], comment: '' }] })
+    }
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'devops', users: ['u1', 'u2'], comment: 'ops team' })
+  }
+  try {
+    const { tools } = createContext()
+    const list = toolByName(tools, 'jumpserver_list_user_groups')
+    const listOutput = await list.execute({}, execution())
+    assert.match(listOutput, /name="devops"/)
+    assert.match(listOutput, /member_count=2/)
+
+    const get = toolByName(tools, 'jumpserver_get_user_group')
+    const getOutput = await get.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(getOutput, /name="devops"/)
+    assert.match(getOutput, /users="u1,u2"/)
+
+    await assert.rejects(get.execute({ id: 'not-a-uuid' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_create_user_group requires name and validates optional members as UUIDs', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    return jsonResponse({ id: 'g1', name: 'devops', users: ['123e4567-e89b-12d3-a456-426614174000'] }, 201)
+  }
+  try {
+    const { tools } = createContext()
+    const create = toolByName(tools, 'jumpserver_create_user_group')
+    const output = await create.execute({ name: 'devops', users: ['123e4567-e89b-12d3-a456-426614174000'] }, execution())
+    assert.match(output, /User group created/)
+    assert.match(output, /name="devops"/)
+
+    const body = JSON.parse(calls[0].init.body)
+    assert.deepEqual(body, { name: 'devops', users: ['123e4567-e89b-12d3-a456-426614174000'] })
+
+    await assert.rejects(create.execute({}, execution()), /missing required property "name"/)
+    await assert.rejects(create.execute({ name: '   ' }, execution()), /name is required/)
+    await assert.rejects(create.execute({ name: 'devops', users: ['not-a-uuid'] }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_update_user_group checks existence first and rejects clearing members to empty', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    if ((init.method ?? 'GET') === 'GET') return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'devops' })
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'devops-renamed', users: ['u1'] })
+  }
+  try {
+    const { tools } = createContext()
+    const update = toolByName(tools, 'jumpserver_update_user_group')
+    const output = await update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'devops-renamed' }, execution())
+    assert.match(output, /User group updated/)
+    assert.equal(calls.length, 2)
+    assert.equal(calls[0].init.method ?? 'GET', 'GET')
+    assert.equal(calls[1].init.method, 'PATCH')
+    const body = JSON.parse(calls[1].init.body)
+    assert.deepEqual(body, { name: 'devops-renamed' })
+
+    await assert.rejects(update.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution()), /Provide at least one field/)
+    await assert.rejects(update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', users: [] }, execution()), /non-empty array/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_update_user_group fails clearly when the group does not exist, without attempting the PATCH', async () => {
+  const originalFetch = globalThis.fetch
+  let patchCount = 0
+  globalThis.fetch = async (_url, init = {}) => {
+    if ((init.method ?? 'GET') === 'PATCH') { patchCount += 1; return jsonResponse({}, 200) }
+    return jsonResponse({ detail: 'Not found.' }, 404)
+  }
+  try {
+    const { tools } = createContext()
+    const update = toolByName(tools, 'jumpserver_update_user_group')
+    await assert.rejects(
+      update.execute({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'x' }, execution()),
+      /404/,
+    )
+    assert.equal(patchCount, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('jumpserver_delete_user_group checks existence first and reports the group name', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init })
+    if ((init.method ?? 'GET') === 'DELETE') return new Response(null, { status: 204 })
+    return jsonResponse({ id: '123e4567-e89b-12d3-a456-426614174000', name: 'devops' })
+  }
+  try {
+    const { tools } = createContext()
+    const del = toolByName(tools, 'jumpserver_delete_user_group')
+    const output = await del.execute({ id: '123e4567-e89b-12d3-a456-426614174000' }, execution())
+    assert.match(output, /User group deleted/)
+    assert.match(output, /name="devops"/)
+    assert.equal(calls.length, 2)
+    assert.equal(calls[1].init.method, 'DELETE')
+
+    await assert.rejects(del.execute({ id: 'not-a-uuid' }, execution()), /valid JumpServer UUID/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('the tools/pre-execute gate also forces user-group write tools to "ask", and command/group reads are untouched', async () => {
+  const { listeners } = createContext()
+  const gate = listeners.get('tools/pre-execute')
+
+  for (const name of ['jumpserver_create_user_group', 'jumpserver_update_user_group', 'jumpserver_delete_user_group']) {
+    const decision = await gate({ name, arguments: { id: 'x', name: 'x' } }, async () => ({ kind: 'allow' }))
+    assert.equal(decision.kind, 'ask', `${name} should require approval`)
+  }
+
+  for (const name of ['jumpserver_list_commands', 'jumpserver_list_user_groups', 'jumpserver_get_user_group']) {
+    const decision = await gate({ name, arguments: {} }, async () => ({ kind: 'allow' }))
+    assert.deepEqual(decision, { kind: 'allow' }, `${name} is read-only and should not require approval`)
   }
 })
 

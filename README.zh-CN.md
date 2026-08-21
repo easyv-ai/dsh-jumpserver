@@ -4,12 +4,12 @@
 
 一个 DeepSeek Harness 插件，通过对话查询并管理 JumpServer 资产，使用 JumpServer 的 AccessKeyID/AccessKeySecret（HTTP Signature）进行鉴权。
 
-> 项目状态：v0.5.0。已实现资产、用户、账号、授权规则、会话的只读查询，以及资产、账号、用户、资产授权规则的创建/更新/删除，以及密码重置——均需经过强制的原生用户审批。考虑到 JumpServer 作为堡垒机/PAM 系统的角色，终止会话和工单审批目前有意保留不实现。
+> 项目状态：v0.6.0。已实现资产、用户、账号、授权规则、会话、命令审计、用户组的只读查询，以及资产、账号、用户、资产授权规则、用户组的创建/更新/删除，以及密码重置——均需经过强制的原生用户审批。考虑到 JumpServer 作为堡垒机/PAM 系统的角色，终止会话和工单审批目前有意保留不实现。
 
 ## 为什么用 dsh-jumpserver
 
-- 按关键字或过滤条件查询 JumpServer 的资产、用户、账号、资产授权规则和终端会话。
-- 创建、更新、删除资产、账号、用户、资产授权规则，以及重置用户密码——每次写操作执行前都必须经过明确的原生用户审批提示，模型无法绕过。
+- 按关键字或过滤条件查询 JumpServer 的资产、用户、账号、资产授权规则、终端会话、已执行命令和用户组。
+- 创建、更新、删除资产、账号、用户、资产授权规则、用户组，以及重置用户密码——每次写操作执行前都必须经过明确的原生用户审批提示，模型无法绕过。
 - 拒绝删除或重置超级管理员（管理员）账号的密码，也拒绝创建"授予所有权限"式的宽泛资产授权规则——这两点都由工具自身强制执行，不只是写在文档里的约定。
 - 只读查询绝不泄露敏感信息：账号的密钥/密钥密码，以及用户的密码/公钥/MFA 密钥，在返回给模型前会被逐字段剔除，即便 JumpServer API 本身返回了这些字段。
 - 使用 JumpServer 官方开发文档中记录的 AccessKeyID/AccessKeySecret 签名机制（`hmac-sha256` HTTP Signature）进行鉴权。
@@ -96,6 +96,12 @@ allowInsecureHttp: false
 | `jumpserver_create_permission` | **写操作。** 创建资产授权规则（必填 `name`；`assets`、`accounts` 必须是非空 UUID 数组；`users`/`userGroups` 至少提供一个且非空）。拒绝宽泛或"授予所有权限"式的匹配——不提供 `all` 或按节点匹配的选项。需要原生用户审批。 |
 | `jumpserver_update_permission` | **写操作。** 按 `id` 更新已有规则；只会修改你传入的字段。传入的任何数组字段（`users`、`userGroups`、`assets`、`accounts`）都必须非空。需要原生用户审批。 |
 | `jumpserver_delete_permission` | **写操作，不可逆。** 按 `id` 永久删除资产授权规则，立即撤销其授予的访问权限。需要原生用户审批。 |
+| `jumpserver_list_commands` | 列出已执行的会话命令（命令审计日志），可按 `asset`、`account`、`user`、`sessionId` 或 `riskLevel` 过滤。每行的命令输出会截断到 500 字符。 |
+| `jumpserver_list_user_groups` | 按可选的 `search` 关键字列出用户组。用户组本身不授予任何资产访问权限。 |
+| `jumpserver_get_user_group` | 按 `id` 获取单个用户组的完整详情，包含其成员用户 id。 |
+| `jumpserver_create_user_group` | **写操作。** 创建用户组（必填 `name`；可选 `users`、`comment`）。需要原生用户审批。 |
+| `jumpserver_update_user_group` | **写操作。** 按 `id` 更新已有用户组；只会修改你传入的字段。若传入 `users`，必须非空。需要原生用户审批。 |
+| `jumpserver_delete_user_group` | **写操作，不可逆。** 按 `id` 永久删除用户组；成员用户本身不会被删除，但引用该组的授权规则会失去对应授权。需要原生用户审批。 |
 
 终止会话和工单审批尚未实现，目前也没有计划实现——详见下方"范围之外"。
 
